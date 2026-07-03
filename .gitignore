@@ -1,0 +1,16 @@
+# Dependencies (installed by pi / npm at runtime/dev)
+node_modules/
+
+# Build artifacts
+*.js
+*.d.ts
+!index.ts
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
