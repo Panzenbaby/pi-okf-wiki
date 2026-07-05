@@ -10,13 +10,32 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { runUpdate, finalizePendingUpdate } from "./update.ts";
-import { runQuery } from "./query.ts";
+import { runQuery, consumePendingQuery, buildWikiQueryContext } from "./query.ts";
 
 export default function okfExtension(pi: ExtensionAPI): void {
   // After any agent turn, finalize a pending /wiki-update run (if any) so the
   // summary reflects the wiki state *after* the agent finished writing.
   pi.on("agent_end", async (_event, ctx) => {
     await finalizePendingUpdate(ctx);
+  });
+
+  // Before every agent turn, check if the turn was triggered by /wiki-query.
+  // If so, retrieve wiki concepts for the user's question and inject them
+  // into the system prompt. This keeps the user message clean (just the
+  // question) while still giving the agent the full wiki context.
+  pi.on("before_agent_start", async (_event, ctx) => {
+    const question = consumePendingQuery();
+    if (!question) return;
+    const result = await buildWikiQueryContext(ctx.cwd, question);
+    if (!result.success) {
+      ctx.ui.notify(`/wiki-query: ${result.error.message}`, "warning");
+      return;
+    }
+    const systemPrompt = ctx.getSystemPrompt();
+    const augmented = systemPrompt
+      ? `${systemPrompt}\n\n${result.data}`
+      : result.data;
+    return { systemPrompt: augmented };
   });
 
   pi.registerCommand("wiki-update", {

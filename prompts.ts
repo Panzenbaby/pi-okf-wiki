@@ -76,6 +76,15 @@ export interface QueryPromptInput {
 }
 
 export function buildQueryPrompt(input: QueryPromptInput): string {
+  return `${buildQuerySystemContext(input)}\n\n## Question\n${input.question}\n\nReply in the same language as the question.`;
+}
+
+/**
+ * Build only the instruction + context portion of a /wiki-query prompt.
+ * This is injected into the system prompt (before_agent_start) so the
+ * user message stays clean: just the question itself.
+ */
+export function buildQuerySystemContext(input: Omit<QueryPromptInput, "question">): string {
   const contextBlock = input.retrieved.length > 0
     ? input.retrieved
         .map((concept) => `--- Concept: ${concept.conceptId} ---\n${concept.content}`)
@@ -86,6 +95,7 @@ export function buildQueryPrompt(input: QueryPromptInput): string {
 Cite every claim with a source. Use inline links of the form
 [title](wiki/<concept-id>.md) at the claim, and end with a "# Sources" section
 listing every concept you used as \`- [title](wiki/<concept-id>.md) — description\`.
+NEVER write a source path as plain text — always render it as a markdown link.
 If the wiki does not contain the answer, say so explicitly and do not invent
 sources. You may use read/grep to explore the wiki further.
 
@@ -96,10 +106,5 @@ ${input.wikiTree}
 ${indexBlock}
 
 ## Retrieved concepts (most relevant)
-${contextBlock}
-
-## Question
-${input.question}
-
-Reply in the same language as the question.`;
+${contextBlock}`;
 }
