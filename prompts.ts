@@ -16,7 +16,12 @@ const OKF_RULES = `OKF (Open Knowledge Format) rules for a concept file:
 - Cite external sources under a # Citations heading, numbered [1] [2].`;
 
 export interface UpdatePromptInput {
-  readonly inputFiles: ReadonlyArray<{ relativePath: string; absolutePath: string }>;
+  readonly inputFiles: ReadonlyArray<{
+    relativePath: string;
+    absolutePath: string;
+    /** Precomputed, collision-free archive destination for this file. */
+    archiveTarget: string;
+  }>;
   readonly archiveDir: string;
   readonly wikiDir: string;
   readonly structure: StructurePreview;
@@ -24,7 +29,10 @@ export interface UpdatePromptInput {
 
 export function buildUpdatePrompt(input: UpdatePromptInput): string {
   const fileList = input.inputFiles
-    .map((file) => `- input/${file.relativePath} (absolute: ${file.absolutePath})`)
+    .map(
+      (file) =>
+        `- input/${file.relativePath} (absolute: ${file.absolutePath}) -> archive to: ${file.archiveTarget}`,
+    )
     .join("\n");
   const dirs = input.structure.directories.length > 0
     ? input.structure.directories.join(", ")
@@ -54,8 +62,13 @@ The following input files are NOT yet OKF-conformant. For EACH file:
    frontmatter (type, title, description, tags, timestamp) and a structured
    body. Extract schemas, examples, and citations where present.
 4. ONLY AFTER the concept file is written successfully, move the original from
-   input/<relativePath> to ${input.archiveDir}/<relativePath> (create
-   subdirectories as needed). Never archive before the wiki write succeeds.
+   input/<relativePath> to the EXACT archive path listed for that file
+   ("archive to: ..." above). Each archive path is precomputed and unique so it
+   will not collide with existing archive files — do NOT pick your own name.
+   Create any needed subdirectories first (mkdir -p), then move with
+   \`mv -n\` (no-clobber). Never overwrite an existing file: if \`mv -n\` does not
+   move (target already exists), leave the file in input/ and note it under
+   "## Skipped". Never archive before the wiki write succeeds.
 5. If a file cannot be transformed (unreadable, empty, binary without text),
    leave it in input/ and note it in your summary.
 

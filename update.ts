@@ -28,6 +28,7 @@ import {
   moveFile,
   pathExists,
   readTextFile,
+  resolveArchiveTarget,
   writeTextFile,
 } from "./files.ts";
 import {
@@ -129,10 +130,13 @@ export async function runUpdate(
       : { directories: [], types: [], sampleConceptIds: [] };
 
     const prompt = buildUpdatePrompt({
-      inputFiles: allNonConformant.map((file) => ({
-        relativePath: file.relativePath,
-        absolutePath: file.absolutePath,
-      })),
+      inputFiles: await Promise.all(
+        allNonConformant.map(async (file) => ({
+          relativePath: file.relativePath,
+          absolutePath: file.absolutePath,
+          archiveTarget: await resolveArchiveTarget(paths.archive, file.relativePath),
+        })),
+      ),
       archiveDir: paths.archive,
       wikiDir: paths.wiki,
       structure,
@@ -272,7 +276,8 @@ async function importConformant(
   const targetPath = `${paths.wiki}/${file.relativePath}`;
   const writeResult = await writeTextFile(targetPath, content.data);
   if (!writeResult.success) return writeResult;
-  const archivePath = `${paths.archive}/${file.relativePath}`;
+  // Archive collision-safe: never overwrite an existing archive file.
+  const archivePath = await resolveArchiveTarget(paths.archive, file.relativePath);
   const moveResult = await moveFile(file.absolutePath, archivePath);
   if (!moveResult.success) return moveResult;
   return ok(conceptIdFromRelativePath(file.relativePath));

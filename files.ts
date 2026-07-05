@@ -61,6 +61,57 @@ export async function moveFile(
   }
 }
 
+/**
+ * Resolve a collision-free archive destination for `relativePath` under
+ * `archiveDir` (relativePath uses posix "/" separators).
+ *
+ * Naming scheme (history-preserving, common case unchanged):
+ *   1. `archive/<rel>`                      if free
+ *   2. `archive/<stem>.<YYYY-MM-DD-HHMM><ext>` if the plain name is taken
+ *   3. `archive/<stem>.<YYYY-MM-DD-HHMM>.<N><ext>` with N=1,2,… if the
+ *      timestamped name is also taken (e.g. two runs in the same minute)
+ *
+ * Existing archive files are NEVER overwritten — every version is kept. The
+ * check-then-rename window is tiny and this runs single-user/local, so the
+ * residual TOCTOU race is acceptable; callers move with `mv -n` (no-clobber)
+ * as a final safety net.
+ */
+export async function resolveArchiveTarget(
+  archiveDir: string,
+  relativePath: string,
+): Promise<string> {
+  const parts = relativePath.split("/");
+  const fileName = parts[parts.length - 1] ?? relativePath;
+  const dirParts = parts.slice(0, -1);
+  // Split stem/ext on the LAST dot. A leading-dot hidden file (e.g. ".md")
+  // has its only dot at index 0 -> treated as stem with no extension.
+  const dot = fileName.lastIndexOf(".");
+  const stem = dot > 0 ? fileName.slice(0, dot) : fileName;
+  const ext = dot > 0 ? fileName.slice(dot) : "";
+  const stamp = archiveTimestamp();
+
+  const baseDir = join(archiveDir, ...dirParts);
+  const candidate = (name: string): string => join(baseDir, name);
+
+  const plain = candidate(fileName);
+  if (!(await pathExists(plain))) return plain;
+
+  const stamped = candidate(`${stem}.${stamp}${ext}`);
+  if (!(await pathExists(stamped))) return stamped;
+
+  let n = 1;
+  while (true) {
+    const counted = candidate(`${stem}.${stamp}.${n}${ext}`);
+    if (!(await pathExists(counted))) return counted;
+  n++;
+  }
+}
+
+/** `YYYY-MM-DD-HHMM` (UTC, filesystem-safe — no colons). */
+function archiveTimestamp(): string {
+  return new Date().toISOString().slice(0, 16).replace("T", "-").replace(":", "");
+}
+
 export interface FileEntry {
   readonly relativePath: string; // relative to root, with extension, posix separators
   readonly absolutePath: string;
