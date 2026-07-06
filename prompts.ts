@@ -40,8 +40,8 @@ export function buildUpdatePrompt(input: UpdatePromptInput): string {
   const types = input.structure.types.length > 0
     ? input.structure.types.map((entry) => `${entry.type} (${entry.count})`).join(", ")
     : "(none yet)";
-  const samples = input.structure.sampleConceptIds.length > 0
-    ? input.structure.sampleConceptIds.join(", ")
+  const existingIds = input.structure.conceptIds.length > 0
+    ? input.structure.conceptIds.join(", ")
     : "(none yet)";
 
   return `You are ingesting new documents into an OKF knowledge base (the "wiki").
@@ -51,13 +51,18 @@ ${OKF_RULES}
 Existing wiki structure:
 - Directories: ${dirs}
 - Types in use: ${types}
-- Sample concept IDs: ${samples}
+- Existing concept IDs: ${existingIds}
 
 The following input files are NOT yet OKF-conformant. For EACH file:
 1. Read it (use the read tool; it handles .md, .txt, .pdf, and images).
 2. Decide a concept ID (path without .md) that fits the existing structure.
-   Prefer existing directories/types when the content matches; create a new
-   subdirectory only when nothing existing fits.
+   First check the "Existing concept IDs" list above; reuse an existing ID when
+   the input updates or extends that concept rather than creating a new file.
+   If unsure whether a concept already exists (large wiki, similar topic),
+   verify with "ls"/"find" on ${input.wikiDir} and "grep" for the candidate
+   title/keywords before writing — do not duplicate an existing concept under
+   a new ID. Prefer existing directories/types when the content matches;
+   create a new subdirectory only when nothing existing fits.
 3. Write the OKF concept file to ${input.wikiDir}/<concept-id>.md with proper
    frontmatter (type, title, description, tags, timestamp) and a structured
    body. Extract schemas, examples, and citations where present.

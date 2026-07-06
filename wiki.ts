@@ -134,7 +134,8 @@ export function diffSnapshots(before: WikiSnapshot, after: WikiSnapshot): WikiDi
 export interface StructurePreview {
   readonly directories: readonly string[];
   readonly types: ReadonlyArray<{ type: string; count: number }>;
-  readonly sampleConceptIds: readonly string[];
+  /** All existing concept IDs (sorted). Used by the agent to avoid duplicates. */
+  readonly conceptIds: readonly string[];
 }
 
 export function buildStructurePreview(concepts: readonly Concept[]): StructurePreview {
@@ -151,15 +152,19 @@ export function buildStructurePreview(concepts: readonly Concept[]): StructurePr
   const types = [...typeCounts.entries()]
     .map(([type, count]) => ({ type, count }))
     .sort((a, b) => b.count - a.count);
-  const sampleConceptIds = concepts
+  // Full list of existing concept IDs (not a capped sample) so the agent can
+  // avoid exact-ID duplicates. This grows with the wiki size; the /wiki-update
+  // prompt additionally instructs the agent to verify a candidate ID with
+  // ls/grep before writing, which scales to any size and also catches
+  // semantic duplicates a pure ID list would miss.
+  const conceptIds = concepts
     .slice()
-    .sort((a, b) => a.conceptId.localeCompare(b.conceptId))
-    .slice(0, 30)
-    .map((c) => c.conceptId);
+    .map((c) => c.conceptId)
+    .sort((a, b) => a.localeCompare(b));
   return {
     directories: [...directories].sort(),
     types,
-    sampleConceptIds,
+    conceptIds,
   };
 }
 

@@ -127,7 +127,7 @@ export async function runUpdate(
     const conceptsBefore = await loadAllConcepts(paths.wiki);
     const structure = conceptsBefore.success
       ? buildStructurePreview(conceptsBefore.data)
-      : { directories: [], types: [], sampleConceptIds: [] };
+      : { directories: [], types: [], conceptIds: [] };
 
     const prompt = buildUpdatePrompt({
       inputFiles: await Promise.all(
