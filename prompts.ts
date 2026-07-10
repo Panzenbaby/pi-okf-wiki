@@ -8,12 +8,27 @@ const OKF_RULES = `OKF (Open Knowledge Format) rules for a concept file:
 - A concept is a markdown file with YAML frontmatter delimited by --- lines.
 - Frontmatter MUST contain a non-empty \`type\` field. Recommended: \`title\`,
   \`description\`, \`resource\` (canonical URI, optional), \`tags\` (list),
-  \`timestamp\` (ISO 8601).
+  \`timestamp\` (ISO 8601). Producers MAY add extra keys (§4.1); consumers
+  preserve them.
 - The body is structural markdown: headings (# Schema, # Examples, # Citations
   where applicable), lists, tables, fenced code blocks.
 - Link related concepts with bundle-relative links like
   [title](/tables/orders.md). Broken links are tolerated.
-- Cite external sources under a # Citations heading, numbered [1] [2].`;
+- Cite external sources under a # Citations heading, numbered [1] [2].
+- One concept per real-world entity: do NOT split a single entity into parallel
+  concept files just because several input files describe it. Variants,
+  versions, and superseded values are expressed INSIDE one concept body, not
+  as separate files.
+- Contradictions are knowledge too. When multiple sources disagree on an
+  attribute of the same concept, do NOT silently pick one value and discard
+  the others. Make the conflict visible in the body (a # Versions / # Conflicts
+  table or prose), cite each source, and mark the canonical value.
+- Temporal precedence: when values conflict, prefer the one with the latest
+  \`timestamp\` (or a "neueste Version" / "latest" marker) as canonical; mark
+  older values as superseded. Use the producer-defined frontmatter fields
+  \`status: current | superseded\` and \`supersedes: /path/to/older.md\` to make
+  the precedence graph explicit. Absent timestamps => keep the conflict
+  unresolved and label all values as "unverified".`;
 
 export interface UpdatePromptInput {
   readonly inputFiles: ReadonlyArray<{
@@ -53,36 +68,73 @@ Existing wiki structure:
 - Types in use: ${types}
 - Existing concept IDs: ${existingIds}
 
-The following input files are NOT yet OKF-conformant. For EACH file:
-1. Read it (use the read tool; it handles .md, .txt, .pdf, and images).
-2. Decide a concept ID (path without .md) that fits the existing structure.
-   First check the "Existing concept IDs" list above; reuse an existing ID when
-   the input updates or extends that concept rather than creating a new file.
-   If unsure whether a concept already exists (large wiki, similar topic),
-   verify with "ls"/"find" on ${input.wikiDir} and "grep" for the candidate
-   title/keywords before writing — do not duplicate an existing concept under
-   a new ID. Prefer existing directories/types when the content matches;
-   create a new subdirectory only when nothing existing fits.
-3. Write the OKF concept file to ${input.wikiDir}/<concept-id>.md with proper
-   frontmatter (type, title, description, tags, timestamp) and a structured
-   body. Extract schemas, examples, and citations where present.
-4. ONLY AFTER the concept file is written successfully, move the original from
-   input/<relativePath> to the EXACT archive path listed for that file
-   ("archive to: ..." above). Each archive path is precomputed and unique so it
-   will not collide with existing archive files — do NOT pick your own name.
-   Create any needed subdirectories first (mkdir -p), then move with
-   \`mv -n\` (no-clobber). Never overwrite an existing file: if \`mv -n\` does not
-   move (target already exists), leave the file in input/ and note it under
-   "## Skipped". Never archive before the wiki write succeeds.
-5. If a file cannot be transformed (unreadable, empty, binary without text),
-   leave it in input/ and note it in your summary.
+The following input files are NOT yet OKF-conformant.
+
+STEP 0 — Cluster inputs by the entity they describe (BEFORE assigning concept IDs):
+- Read every input file first (use the read tool; it handles .md, .txt, .pdf, and images).
+- Group files that describe the SAME real-world entity. Match on the asserted
+  name (e.g. "ALG-32"), canonical resource, or distinctive keywords — NOT on the
+  input filename. Files named like foo-2.txt / foo-3.txt are usually VERSIONS of
+  the same entity, not new concepts.
+- Each cluster becomes a SINGLE concept file. Do not create one concept per
+  input file when several inputs describe one entity.
+
+STEP 1 — Decide a concept ID (path without .md) for each cluster that fits the
+existing structure.
+- First check the "Existing concept IDs" list above; reuse an existing ID when
+  a cluster updates or extends that concept rather than creating a new file.
+- If unsure whether a concept already exists (large wiki, similar topic),
+  verify with "ls"/"find" on ${input.wikiDir} and "grep" for the candidate
+  title/keywords before writing — do not duplicate an existing concept under
+  a new ID. Prefer existing directories/types when the content matches; create
+  a new subdirectory only when nothing existing fits.
+
+STEP 2 — Reconcile the cluster and write ONE OKF concept file to
+${input.wikiDir}/<concept-id>.md:
+- Frontmatter: type, title, description, tags, timestamp (ISO 8601). For a
+  cluster, set the concept \`timestamp\` to the latest source timestamp (or now,
+  if sources carry none).
+- Body: structured markdown. Extract schemas, examples, and citations where
+  present. Express variants/versions INSIDE the body (a # Versions table or a
+  # Conflicts section), linked and explained — not as parallel concept files.
+- CONFLICT HANDLING: if the cluster's sources disagree on the same attribute
+  (e.g. colour = green in one file, blue in another), do NOT pick one silently.
+  Make the disagreement visible:
+    * Add a # Conflicts (or # Versions) table: one row per source with columns
+      for the differing attribute(s), the source value, the source citation,
+      and the source timestamp.
+    * Cite each source under # Citations (numbered [1] [2]), pointing at the
+      archived original or external URL.
+    * Choose a CANONICAL value using temporal precedence (latest timestamp /
+      "neueste Version" / "latest" marker wins) and state it explicitly in the
+      description and in the # Schema. Mark superseded values as such.
+    * If no source is clearly newer, leave ALL conflicting values in the table
+      labelled "unverified" and do not declare a canonical one.
+  Use the producer-defined frontmatter fields \`status\`
+  (\`current\` / \`superseded\`) and \`supersedes: /path/to/older.md\` to make the
+  precedence graph explicit when applicable.
+
+STEP 3 — ONLY AFTER the concept file is written successfully, move EACH original
+from input/<relativePath> to the EXACT archive path listed for that file
+("archive to: ..." above). Each archive path is precomputed and unique so it
+will not collide with existing archive files — do NOT pick your own name.
+Create any needed subdirectories first (mkdir -p), then move with
+\`mv -n\` (no-clobber). Never overwrite an existing file: if \`mv -n\` does not
+move (target already exists), leave the file in input/ and note it under
+"## Skipped". Never archive before the wiki write succeeds. Archive every
+member of a cluster once its merged concept file is written.
+
+STEP 4 — If a file cannot be transformed (unreadable, empty, binary without text),
+leave it in input/ and note it in your summary.
 
 Input files to transform:
 ${fileList}
 
 When done, output a concise summary section titled "## Transformed"
 with one bullet per transformed concept: \`<concept-id>\` — <title> — one-line
-note. Then a "## Skipped" section for files you could not transform.
+note (mention merged source count and any conflicts, e.g. "merged 3 sources;
+conflict on colour -> canonical green (latest)"). Then a "## Skipped" section
+for files you could not transform.
 Reply in the same language as the content you transformed.`;
 }
 
@@ -116,6 +168,24 @@ listing every concept you used as \`- [title](wiki/<concept-id>.md) — descript
 NEVER write a source path as plain text — always render it as a markdown link.
 If the wiki does not contain the answer, say so explicitly and do not invent
 sources. You may use read/grep to explore the wiki further.
+
+Conflict & completeness rules (IMPORTANT):
+- A single concept may hold several values for one attribute (a # Conflicts /
+  # Versions table) when its sources disagree. Before answering, OPEN the
+  concept and read the whole body — do not answer from a snippet alone.
+- When the concept declares a CANONICAL value (via timestamp precedence,
+  \`status: current\`, or an explicit "canonical" statement), answer with the
+  canonical value, but ALSO note that other sources disagree (e.g. "grün
+  (kanonisch laut neuester Version); ältere Quelle nennt blau").
+- When NO canonical value is declared, do NOT pick one silently. State that
+  the wiki records conflicting values, list each value with its source, and
+  label them unverified. Do not present a single value as fact.
+- Traverse links: if a concept links to related/variant/superseded concepts
+  via # Related Concepts / # Versions / \`supersedes\`, follow those links
+  (read the target files) before answering, so you never miss a newer or
+  superseding value.
+- If you find a contradiction while exploring, make it explicit in the answer
+  and cite both sides.
 
 ## Wiki tree
 ${input.wikiTree}
