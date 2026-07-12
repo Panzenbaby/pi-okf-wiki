@@ -71,14 +71,19 @@ available. Reload after upgrading with `/reload`.
    non-empty `type` field. Taken over deterministically (no LLM): the file is
    written to `wiki/<relative-path>` and only then moved from `input/` to
    `archive/`. Its concept ID is the path without `.md`.
-2. **Non-conformant** — everything else worth reading: a `.md` without
-   frontmatter/`type`, or `.txt` / `.pdf` / images (`.png`, `.jpg`, `.gif`,
-   `.webp`, `.bmp`) extracted via Pi's `read` tool. These are handed to the
-   agent, which reads the file, produces an OKF concept (frontmatter +
-   structured body, cross-links, citations), writes it to `wiki/`, and then
-   moves the original to `archive/`. The existing wiki structure
-   (directories, types, sample concept IDs) is passed to the agent so new
-   concepts fit in.
+2. **Non-conformant** — everything else worth reading: a `.md` lacking
+   frontmatter or a non-empty `type` field, or `.txt` / `.pdf` / images
+   (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.bmp`) extracted via Pi's `read`
+   tool. These are handed to the agent, which reads every non-conformant file,
+   **clusters** those describing the same real-world entity (matched on
+   asserted name / resource / keywords, not on filename), and writes **one OKF
+   concept per cluster** (frontmatter + structured body, cross-links, citations)
+   to `wiki/` before moving each original to `archive/`. The existing wiki
+   structure — directories, types in use, and the **full list of existing
+   concept IDs** — is passed to the agent so new concepts fit in and duplicate
+   IDs are avoided. This bucket (and every `/wiki-query`) invokes an agent turn,
+   i.e. uses the LLM; conformant files are ingested deterministically with no
+   LLM call.
 3. **Ignored** — unsupported file types, and reserved filenames `index.md` /
    `log.md` placed in `input/`. Listed in the summary with a reason and left in
    `input/`.
@@ -110,22 +115,46 @@ OKF /wiki-update summary
 
 An original is moved to `archive/` **only after** its content exists as a
 concept in `wiki/` — per file. If a run is interrupted, the file stays in
-`input/` and is reprocessed on the next `/wiki-update`. Collisions overwrite
-(the archive preserves the prior original), which makes `/wiki-update`
-idempotent and abort-safe.
+`input/` and is reprocessed on the next `/wiki-update`. Archive destinations
+are **collision-free**: if `archive/<rel>` is already taken, the new copy is
+timestamped (`orders.2026-07-12-1305.md`, then `…-1`, `…-2` within the same
+minute) and existing archive files are **never** overwritten. This keeps every
+version of an original while making `/wiki-update` idempotent and abort-safe.
 
 Finalization (snapshot diff, `index.md`/`log.md` regeneration, leftover
 detection, summary) runs in Pi's `agent_end` event, so it always sees the wiki
 state *after* the agent finished writing — not a racy pre-turn snapshot.
 
+### Conflict handling & versioning
+
+When several inputs (or a new input and an existing concept) describe the same
+entity but disagree on a value, the agent does **not** silently pick one.
+Instead it records the disagreement inside the single concept body:
+
+- A `# Conflicts` (or `# Versions`) table — one row per source with the
+  differing attribute, its value, citation, and timestamp.
+- Each source cited under a `# Citations` heading (numbered `[1]` `[2]`).
+- A **canonical** value chosen by temporal precedence: the value with the
+  latest `timestamp` / “latest” marker wins and is stated in the `description`
+  and `# Schema`; older values are marked superseded. If no source is clearly
+  newer, all conflicting values stay in the table labelled **unverified** and
+  no canonical value is declared.
+
 ## How `/wiki-query` works
 
 1. Load all concepts from `wiki/`.
-2. Term-frequency retrieval picks the top matches for the question; the root
-   `index.md` and the full wiki tree are always included as context.
+2. Term-frequency retrieval picks the top 10 matches for the question; the
+   root `index.md` and the full wiki tree are always included as context.
 3. The agent answers in the same language as the question, citing each claim
    with an inline `[title](wiki/<concept-id>.md)` link and a `# Sources` section
    at the end. It may use `read`/`grep` to explore the wiki further.
+4. The retrieved concepts, `index.md`, and the wiki tree are injected into the
+   **system prompt** via a `before_agent_start` hook, so the user message stays
+   clean — just the question itself. This keeps the session readable and the
+   question persistable. The agent is also told to **open the whole concept
+   body** before answering (not just the retrieved snippet), to follow
+   `# Related Concepts` / `# Versions` links, and to surface any conflicts it
+   finds while exploring.
 
 If `wiki/` does not exist or has no concepts, `/wiki-query` tells you to run
 `/wiki-update` first instead of inventing an answer.
@@ -159,6 +188,12 @@ timestamp: 2026-07-03T00:00:00Z
 
 Part of the [sales dataset](/datasets/sales.md).
 ```
+
+> **Link styles:** inside concept files, links are bundle-relative
+> (`/tables/orders.md` — relative to the `wiki/` bundle). In `/wiki-query`
+> answers, links are repo-relative (`wiki/tables/orders.md`) because the answer
+> renders outside the bundle, from the project root. These are two different
+> rendering contexts, not two competing conventions.
 
 ## Configuration
 

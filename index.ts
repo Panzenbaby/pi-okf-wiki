@@ -3,9 +3,6 @@
 // Commands:
 //   /wiki-update — ingest new documents from input/ into the wiki/ bundle.
 //   /wiki-query  — answer a question against the wiki with source citations.
-//
-// See CONTEXT.md and docs/adr/0001-okf-extension-architecture.md for the
-// design rationale.
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
