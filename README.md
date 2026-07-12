@@ -30,7 +30,7 @@ Missing folders are created on the first `/wiki-update`.
 
 ## Installation
 
-### From npm (once published)
+### From npm
 
 ```bash
 pi install npm:pi-okf-wiki
@@ -39,9 +39,9 @@ pi install npm:pi-okf-wiki
 ### From git
 
 ```bash
-pi install git:github.com/panzenbaby/pi-okf-wiki
+pi install git:github.com/Panzenbaby/pi-okf-wiki
 # or, for a specific ref:
-pi install git:github.com/panzenbaby/pi-okf-wiki@v0.1.0
+pi install git:github.com/Panzenbaby/pi-okf-wiki@v0.1.0
 ```
 
 ### Local / development
