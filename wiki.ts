@@ -26,11 +26,14 @@ export {
 
 export {
   retrieveConcepts,
+  defaultRetriever,
+  TermFrequencyRetriever,
   renderConceptForPrompt,
   tokenize,
   renderWikiTree,
   displayTitle,
   buildStructurePreview,
+  type Retriever,
   type StructurePreview,
   type RetrievedConcept,
 } from "./wiki/retrieval.ts";

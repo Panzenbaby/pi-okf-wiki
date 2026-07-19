@@ -254,11 +254,11 @@ leaks outside its repository.
 | `wiki/paths.ts` | `wikiPaths`, `conceptIdFromRelativePath`, `isConceptFile`, `relativePosix`, `WikiPaths`. |
 | `wiki/concepts.ts` | Concept loading (`loadConcept`, `loadAllConcepts`), snapshot/diff (`snapshotWiki`, `diffSnapshots`, `WikiDiff`). |
 | `wiki/index-log.ts` | `index.md` / `log.md` generation (`generateIndexMd`, `writeIndexMd`, `appendLogMd`, `buildLogEntry`). |
-| `wiki/retrieval.ts` | Structure preview and term-frequency retrieval (`retrieveConcepts`, `tokenize`, `renderConceptForPrompt`, `renderWikiTree`, `displayTitle`, `buildStructurePreview`, `TERM_STOPWORDS`). |
+| `wiki/retrieval.ts` | Structure preview and term-frequency retrieval. The `Retriever` interface is the seam injected into `/wiki-query`; `TermFrequencyRetriever` is the default implementation (same scoring as the former `retrieveConcepts` free function, kept as a thin wrapper). Also: `tokenize`, `renderConceptForPrompt`, `renderWikiTree`, `displayTitle`, `buildStructurePreview`, `TERM_STOPWORDS`. |
 | `prompts.ts` | Agent prompt builders for ingestion and query. |
 | `update.ts` | `/wiki-update` command logic and the `IntakeSession` (finalize) that owns the agent-handoff state. |
 | `classifier.ts` | `InputClassifier` that owns the full input→bucket pipeline AND the deterministic conformant intake: tentative dispatch by extension, the extraction pass (staging extracted text), and pass 3 — read + verify frontmatter + write to `wiki/` + archive original — for conformant `.md` files. Emits the three final buckets (`conformantImported` / `forAgent` / `ignored`) once, in input order. |
-| `query.ts` | `/wiki-query` command logic and the `QuerySession` that owns the pending question. |
+| `query.ts` | `/wiki-query` command logic and the `QuerySession` that owns the pending question. Both `buildWikiQueryContext` and `runQuery` take an optional `Retriever` (default `TermFrequencyRetriever`) so the scoring strategy is injectable. |
 | `extract/types.ts` | `ExtractedText` AppModel, `DocumentExtractorRepository` interface, extraction-failure cause codes. |
 | `extract/pdf.ts` | `PdfRepository` (`unpdf`). |
 | `extract/docx.ts` | `DocxRepository` (`mammoth`). |

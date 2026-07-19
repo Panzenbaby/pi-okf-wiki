@@ -13,8 +13,9 @@ import { pathExists, readTextFile } from "./files.ts";
 import {
   loadAllConcepts,
   renderWikiTree,
-  retrieveConcepts,
   wikiPaths,
+  type Retriever,
+  TermFrequencyRetriever,
 } from "./wiki.ts";
 import { buildQuerySystemContext } from "./prompts.ts";
 
@@ -56,6 +57,7 @@ export const querySessionRegistry = new SessionRegistry<QuerySession>();
 export async function buildWikiQueryContext(
   cwd: string,
   question: string,
+  retriever: Retriever = new TermFrequencyRetriever(),
 ): Promise<Result<string>> {
   const paths = wikiPaths(cwd);
   if (!(await pathExists(paths.wiki))) {
@@ -67,7 +69,7 @@ export async function buildWikiQueryContext(
     return err<string>("wiki/ has no concepts yet. Run /wiki-update first.");
   }
 
-  const retrieved = retrieveConcepts(concepts.data, question, RETRIEVAL_LIMIT);
+  const retrieved = retriever.retrieve(concepts.data, question, RETRIEVAL_LIMIT);
   const indexContent = await readIndex(paths.wiki);
   const wikiTree = renderWikiTree(concepts.data);
 
@@ -87,6 +89,7 @@ export async function runQuery(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
   question: string,
+  retriever: Retriever = new TermFrequencyRetriever(),
 ): Promise<Result<void>> {
   // Drain any pre-existing pending query session so a second /wiki-query does
   // not silently drop the first (e.g. prior turn aborted / never fired
@@ -119,7 +122,7 @@ export async function runQuery(
     return ok(undefined);
   }
 
-  const retrieved = retrieveConcepts(concepts.data, trimmed, RETRIEVAL_LIMIT);
+  const retrieved = retriever.retrieve(concepts.data, trimmed, RETRIEVAL_LIMIT);
   ctx.ui.setStatus("okf-query", `Querying wiki (${retrieved.length} hits)…`);
 
   // Set the session display name to the user's question (so the session
