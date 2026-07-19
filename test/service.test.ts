@@ -10,9 +10,9 @@ import {
   cleanExtractionTemp,
   cleanupExtractionTemp,
   extractToTempFile,
-} from "../extract/service.ts";
-import { pathExists } from "../files.ts";
-import { resolveArchiveTarget } from "../files.ts";
+} from "../src/extract/service.ts";
+import { pathExists } from "../src/files.ts";
+import { resolveArchiveTarget } from "../src/files.ts";
 
 let workdir: string;
 let inputRoot: string;

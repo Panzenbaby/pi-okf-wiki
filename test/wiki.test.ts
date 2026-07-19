@@ -3,11 +3,11 @@ import { describe, expect, it } from "vitest";
 import {
   conceptIdFromRelativePath,
   isConceptFile,
-} from "../wiki/paths.ts";
-import { diffSnapshots } from "../wiki/concepts.ts";
-import type { Concept, Frontmatter, WikiSnapshot } from "../types.ts";
-import { generateIndexMd } from "../wiki/index-log.ts";
-import { tokenize } from "../wiki/retrieval.ts";
+} from "../src/wiki/paths.ts";
+import { diffSnapshots } from "../src/wiki/concepts.ts";
+import type { Concept, Frontmatter, WikiSnapshot } from "../src/types.ts";
+import { generateIndexMd } from "../src/wiki/index-log.ts";
+import { tokenize } from "../src/wiki/retrieval.ts";
 
 describe("conceptIdFromRelativePath", () => {
   it("strips the .md suffix", () => {
@@ -111,26 +111,20 @@ describe("tokenize", () => {
     expect(tokenize("a ab abc d")).toEqual(["abc"]);
   });
 
-  it("drops English stopwords", () => {
-    // "the" is an English stopword and must be filtered out.
-    expect(tokenize("the quick brown fox")).toEqual(["quick", "brown", "fox"]);
-  });
-
-  it("drops German stopwords", () => {
-    // "der", "die", "und" are German stopwords and must be filtered out.
-    expect(tokenize("der tisch die stühle und bänke")).toEqual([
-      "tisch",
-      "stühle",
-      "bänke",
-    ]);
-  });
-
-  it("preserves German umlauts and ß (the split regex includes äöüß)", () => {
+  it("preserves German umlauts and ß (Unicode \\p{L} covers them)", () => {
     expect(tokenize("Größe Maßstraße")).toEqual(["größe", "maßstraße"]);
   });
 
-  it("returns an empty array when only stopwords / short tokens remain", () => {
-    expect(tokenize("the a an of to in")).toEqual([]);
+  it("does not filter stopwords — downweighting happens via IDF in the retriever, not in the tokenizer", () => {
+    // No hardcoded stopword list is maintained: "the" (length 3) passes
+    // through tokenize. Common terms are downweighted at scoring time by
+    // IDF computed from the corpus, keeping retrieval language-independent.
+    expect(tokenize("the quick brown fox")).toEqual([
+      "the",
+      "quick",
+      "brown",
+      "fox",
+    ]);
   });
 });
 

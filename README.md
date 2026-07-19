@@ -174,7 +174,7 @@ Instead it records the disagreement inside the single concept body:
 ## How `/wiki-query` works
 
 1. Load all concepts from `wiki/`.
-2. Term-frequency retrieval picks the top 10 matches for the question; the
+2. TF-IDF cosine retrieval picks the top 10 matches for the question; the
    root `index.md` and the full wiki tree are always included as context.
 3. The agent answers in the same language as the question, citing each claim
    with an inline `[title](wiki/<concept-id>.md)` link and a `# Sources` section
@@ -231,7 +231,7 @@ Part of the [sales dataset](/datasets/sales.md).
 There is no configuration file yet. The extension always reads from
 `input/`, `archive/`, and `wiki/` relative to `ctx.cwd`. `/wiki-query`
 answers and `/wiki-update` summaries follow the language of the question /
-transformed content automatically; edit `prompts.ts` to change that behavior.
+transformed content automatically; edit `src/prompts.ts` to change that behavior.
 
 ## Architecture
 
@@ -245,30 +245,30 @@ leaks outside its repository.
 
 | File | Responsibility |
 | --- | --- |
-| `index.ts` | Registers the `/wiki-update` and `/wiki-query` commands; owns the `agent_end` finalize hook and the `before_agent_start` query-context hook (both via the session registries). |
-| `types.ts` | `Result<T>`, `AppError`, OKF domain models, and the `IgnoreReason` code union. |
-| `session.ts` | `Session` interface and the generic `SessionRegistry<T>` that owns the single-slot handoff between a command handler and an event hook. |
-| `frontmatter.ts` | Minimal YAML frontmatter parser for the OKF subset. |
-| `files.ts` | Filesystem helpers, all returning `Result<T>` (incl. `copyFile`, `removeDir`). |
-| `wiki.ts` | Barrel re-exporting the `wiki/` modules so the `./wiki.ts` import surface stays stable for `update.ts`, `query.ts`, `classifier.ts`, and `prompts.ts`. |
-| `wiki/paths.ts` | `wikiPaths`, `conceptIdFromRelativePath`, `isConceptFile`, `relativePosix`, `WikiPaths`. |
-| `wiki/concepts.ts` | Concept loading (`loadConcept`, `loadAllConcepts`), snapshot/diff (`snapshotWiki`, `diffSnapshots`, `WikiDiff`). |
-| `wiki/index-log.ts` | `index.md` / `log.md` generation (`generateIndexMd`, `writeIndexMd`, `appendLogMd`, `buildLogEntry`). |
-| `wiki/retrieval.ts` | Structure preview and term-frequency retrieval. The `Retriever` interface is the seam injected into `/wiki-query`; `TermFrequencyRetriever` is the default implementation (same scoring as the former `retrieveConcepts` free function, kept as a thin wrapper). Also: `tokenize`, `renderConceptForPrompt`, `renderWikiTree`, `displayTitle`, `buildStructurePreview`, `TERM_STOPWORDS`. |
-| `prompts.ts` | Agent prompt builders for ingestion and query. |
-| `update.ts` | `/wiki-update` command logic and the `IntakeSession` (finalize) that owns the agent-handoff state. |
-| `classifier.ts` | `InputClassifier` that owns the full input→bucket pipeline AND the deterministic conformant intake: tentative dispatch by extension, the extraction pass (staging extracted text), and pass 3 — read + verify frontmatter + write to `wiki/` + archive original — for conformant `.md` files. Emits the three final buckets (`conformantImported` / `forAgent` / `ignored`) once, in input order. |
-| `query.ts` | `/wiki-query` command logic and the `QuerySession` that owns the pending question. Both `buildWikiQueryContext` and `runQuery` take an optional `Retriever` (default `TermFrequencyRetriever`) so the scoring strategy is injectable. |
-| `extract/types.ts` | `ExtractedText` AppModel, `DocumentExtractorRepository` interface, extraction-failure cause codes. |
-| `extract/pdf.ts` | `PdfRepository` (`unpdf`). |
-| `extract/docx.ts` | `DocxRepository` (`mammoth`). |
-| `extract/sheet.ts` | `SheetRepository` (`exceljs`), rendering worksheets as markdown tables. |
-| `extract/office-xml.ts` | `PptxRepository`, `OdtRepository`, `EpubRepository` (shared `jszip` + XML helpers, EPUB spine-order). |
-| `extract/html.ts` | `HtmlRepository` (`html-to-text`). |
-| `extract/rtf.ts` | `RtfRepository` (dependency-free RTF stripper). |
-| `extract/registry.ts` | Format taxonomy + `ExtractorRegistry` dispatch. |
-| `extract/service.ts` | Extraction-to-temp-file orchestration and the `.okf-extract/` lifecycle. |
-| `extract/util.ts` | Shared `Result<T>` failure + error-message helpers for repositories. |
+| `src/index.ts` | Registers the `/wiki-update` and `/wiki-query` commands; owns the `agent_end` finalize hook and the `before_agent_start` query-context hook (both via the session registries). |
+| `src/types.ts` | `Result<T>`, `AppError`, OKF domain models, and the `IgnoreReason` code union. |
+| `src/session.ts` | `Session` interface and the generic `SessionRegistry<T>` that owns the single-slot handoff between a command handler and an event hook. |
+| `src/frontmatter.ts` | Minimal YAML frontmatter parser for the OKF subset. |
+| `src/files.ts` | Filesystem helpers, all returning `Result<T>` (incl. `copyFile`, `removeDir`). |
+| `src/wiki.ts` | Barrel re-exporting the `wiki/` modules so the `./wiki.ts` import surface stays stable for `update.ts`, `query.ts`, `classifier.ts`, and `prompts.ts`. |
+| `src/wiki/paths.ts` | `wikiPaths`, `conceptIdFromRelativePath`, `isConceptFile`, `relativePosix`, `WikiPaths`. |
+| `src/wiki/concepts.ts` | Concept loading (`loadConcept`, `loadAllConcepts`), snapshot/diff (`snapshotWiki`, `diffSnapshots`, `WikiDiff`). |
+| `src/wiki/index-log.ts` | `index.md` / `log.md` generation (`generateIndexMd`, `writeIndexMd`, `appendLogMd`, `buildLogEntry`). |
+| `src/wiki/retrieval.ts` | Structure preview and TF-IDF cosine retrieval. The `Retriever` interface is the seam injected into `/wiki-query`; `TermFrequencyRetriever` is the default implementation (it replaces the former `retrieveConcepts` free function, which is kept as a thin wrapper). IDF is computed on the fly from the loaded concepts so common terms are downweighted in any language — no hardcoded stopword list. Also exports: `tokenize`, `renderConceptForPrompt`, `renderWikiTree`, `displayTitle`, `buildStructurePreview`. |
+| `src/prompts.ts` | Agent prompt builders for ingestion and query. |
+| `src/update.ts` | `/wiki-update` command logic and the `IntakeSession` (finalize) that owns the agent-handoff state. |
+| `src/classifier.ts` | `InputClassifier` that owns the full input→bucket pipeline AND the deterministic conformant intake: tentative dispatch by extension, the extraction pass (staging extracted text), and pass 3 — read + verify frontmatter + write to `wiki/` + archive original — for conformant `.md` files. Emits the three final buckets (`conformantImported` / `forAgent` / `ignored`) once, in input order. |
+| `src/query.ts` | `/wiki-query` command logic and the `QuerySession` that owns the pending question. Both `buildWikiQueryContext` and `runQuery` take an optional `Retriever` (default `TermFrequencyRetriever`) so the scoring strategy is injectable. |
+| `src/extract/types.ts` | `ExtractedText` AppModel, `DocumentExtractorRepository` interface, extraction-failure cause codes. |
+| `src/extract/pdf.ts` | `PdfRepository` (`unpdf`). |
+| `src/extract/docx.ts` | `DocxRepository` (`mammoth`). |
+| `src/extract/sheet.ts` | `SheetRepository` (`exceljs`), rendering worksheets as markdown tables. |
+| `src/extract/office-xml.ts` | `PptxRepository`, `OdtRepository`, `EpubRepository` (shared `jszip` + XML helpers, EPUB spine-order). |
+| `src/extract/html.ts` | `HtmlRepository` (`html-to-text`). |
+| `src/extract/rtf.ts` | `RtfRepository` (dependency-free RTF stripper). |
+| `src/extract/registry.ts` | Format taxonomy + `ExtractorRegistry` dispatch. |
+| `src/extract/service.ts` | Extraction-to-temp-file orchestration and the `.okf-extract/` lifecycle. |
+| `src/extract/util.ts` | Shared `Result<T>` failure + error-message helpers for repositories. |
 
 ### Development
 

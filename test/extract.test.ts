@@ -6,12 +6,12 @@ import JSZip from "jszip";
 import ExcelJS from "exceljs";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { DocxRepository } from "../extract/docx.ts";
-import { HtmlRepository } from "../extract/html.ts";
-import { EpubRepository, OdtRepository, PptxRepository } from "../extract/office-xml.ts";
-import { PdfRepository } from "../extract/pdf.ts";
-import { RtfRepository } from "../extract/rtf.ts";
-import { SheetRepository } from "../extract/sheet.ts";
+import { DocxRepository } from "../src/extract/docx.ts";
+import { HtmlRepository } from "../src/extract/html.ts";
+import { EpubRepository, OdtRepository, PptxRepository } from "../src/extract/office-xml.ts";
+import { PdfRepository } from "../src/extract/pdf.ts";
+import { RtfRepository } from "../src/extract/rtf.ts";
+import { SheetRepository } from "../src/extract/sheet.ts";
 
 let workdir: string;
 

@@ -4,10 +4,10 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { cleanExtractionTemp } from "../extract/service.ts";
-import { createClassifier } from "../classifier.ts";
-import { wikiPaths } from "../wiki.ts";
-import type { InputFile } from "../types.ts";
+import { cleanExtractionTemp } from "../src/extract/service.ts";
+import { createClassifier } from "../src/classifier.ts";
+import { wikiPaths } from "../src/wiki.ts";
+import type { InputFile } from "../src/types.ts";
 
 let workdir: string;
 let inputRoot: string;

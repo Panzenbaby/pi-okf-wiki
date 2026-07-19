@@ -11,5 +11,5 @@
     "noUnusedLocals": true,
     "types": []
   },
-  "include": ["*.ts", "wiki/**/*.ts", "extract/**/*.ts", "test/**/*.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts"]
 }

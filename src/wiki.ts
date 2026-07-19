@@ -28,6 +28,7 @@ export {
   retrieveConcepts,
   defaultRetriever,
   TermFrequencyRetriever,
+  TfIdfRetriever,
   renderConceptForPrompt,
   tokenize,
   renderWikiTree,

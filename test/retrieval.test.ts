@@ -4,14 +4,14 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import type { Concept, Frontmatter, Result } from "../types.ts";
+import type { Concept, Frontmatter, Result } from "../src/types.ts";
 import {
   TermFrequencyRetriever,
   defaultRetriever,
   type RetrievedConcept,
   type Retriever,
-} from "../wiki/retrieval.ts";
-import { buildWikiQueryContext } from "../query.ts";
+} from "../src/wiki/retrieval.ts";
+import { buildWikiQueryContext } from "../src/query.ts";
 
 const frontmatter = (overrides: Partial<Frontmatter> = {}): Frontmatter => ({
   type: "concept",
@@ -54,11 +54,25 @@ describe("TermFrequencyRetriever", () => {
     expect(result[0].conceptId).toBe("tables/orders");
   });
 
-  it("returns an empty array when the question contains only stopwords", () => {
+  it("returns an empty array when the question has no term overlap with any concept", () => {
+    // No hardcoded stopword filter is involved: the question's terms simply
+    // do not appear in any concept, so every cosine similarity is 0 and all
+    // concepts are excluded. (The earlier "only stopwords" framing is gone —
+    // stopword-like terms are now downweighted via IDF, not dropped.)
     const concepts = [
       concept("tables/orders", { title: "Orders" }, "order order order"),
     ];
-    expect(retriever.retrieve(concepts, "the a an of to in", 10)).toEqual([]);
+    expect(retriever.retrieve(concepts, "colors unrelated", 10)).toEqual([]);
+  });
+
+  it("returns an empty array when the question yields no usable query terms", () => {
+    // Locks in the queryMag === 0 guard: a question whose only tokens are
+    // ≤2 characters produces an empty query vector (no terms pass the
+    // length filter), so retrieval short-circuits without scoring any doc.
+    const concepts = [
+      concept("tables/orders", { title: "Orders" }, "order order order"),
+    ];
+    expect(retriever.retrieve(concepts, "a ab", 10)).toEqual([]);
   });
 
   it("respects the limit argument", () => {

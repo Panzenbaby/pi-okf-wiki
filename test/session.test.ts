@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { SessionRegistry, type Session } from "../session.ts";
+import { SessionRegistry, type Session } from "../src/session.ts";
 
 class FakeSession implements Session {
   constructor(readonly id: string) {}

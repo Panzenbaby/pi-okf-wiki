@@ -4,7 +4,7 @@ node_modules/
 # Build artifacts
 *.js
 *.d.ts
-!index.ts
+!src/index.ts
 
 # Logs
 *.log

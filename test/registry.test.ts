@@ -5,7 +5,7 @@ import {
   IMAGE_EXTENSIONS,
   TEXT_READABLE_EXTENSIONS,
   extractorForExtension,
-} from "../extract/registry.ts";
+} from "../src/extract/registry.ts";
 
 describe("extractor registry", () => {
   it("registers every extractable format", () => {
