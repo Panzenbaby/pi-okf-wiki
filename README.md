@@ -72,21 +72,27 @@ available. Reload after upgrading with `/reload`.
    written to `wiki/<relative-path>` and only then moved from `input/` to
    `archive/`. Its concept ID is the path without `.md`.
 2. **Non-conformant** — everything else worth reading: a `.md` lacking
-   frontmatter or a non-empty `type` field, or `.txt` / `.pdf` / images
-   (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.bmp`) extracted via Pi's `read`
-   tool. These are handed to the agent, which reads every non-conformant file,
-   **clusters** those describing the same real-world entity (matched on
-   asserted name / resource / keywords, not on filename), and writes **one OKF
-   concept per cluster** (frontmatter + structured body, cross-links, citations)
-   to `wiki/` before moving each original to `archive/`. The existing wiki
-   structure — directories, types in use, and the **full list of existing
-   concept IDs** — is passed to the agent so new concepts fit in and duplicate
-   IDs are avoided. This bucket (and every `/wiki-query`) invokes an agent turn,
-   i.e. uses the LLM; conformant files are ingested deterministically with no
-   LLM call.
-3. **Ignored** — unsupported file types, and reserved filenames `index.md` /
-   `log.md` placed in `input/`. Listed in the summary with a reason and left in
-   `input/`.
+   frontmatter or a non-empty `type` field; plain text (`.txt`, `.csv`, `.json`)
+   and images (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.bmp`) read directly by
+   Pi's `read` tool; and binary/structured documents (`.pdf`, `.docx`, `.pptx`,
+   `.xlsx`, `.odt`, `.html`/`.htm`, `.epub`, `.rtf`) which the extension
+   **pre-extracts to plain text** into a temp
+   `input/.okf-extract/<relative-dir>/<stem>-extracted.txt` and hands *that* to
+   the agent (see [Supported formats](#supported-formats)). These are handed to
+   the agent, which reads every non-conformant file, **clusters** those
+   describing the same real-world entity (matched on asserted name / resource /
+   keywords, not on filename), and writes **one OKF concept per cluster**
+   (frontmatter + structured body, cross-links, citations) to `wiki/` before
+   moving each original to `archive/`. The existing wiki structure —
+   directories, types in use, and the **full list of existing concept IDs** — is
+   passed to the agent so new concepts fit in and duplicate IDs are avoided.
+   This bucket (and every `/wiki-query`) invokes an agent turn, i.e. uses the
+   LLM; conformant files are ingested deterministically with no LLM call.
+3. **Ignored** — unsupported file types, reserved filenames `index.md` /
+   `log.md` placed in `input/`, and documents whose extraction failed (encrypted,
+   no extractable text, or a lib error). Listed in the summary with a stable
+   reason code (`unsupported`, `reserved`, `encrypted`, `extraction_failed`,
+   `empty`, `io_failed`) and left in `input/`.
 
 After the agent turn, the extension regenerates `index.md`, appends a dated
 entry to `log.md`, detects any files still left in `input/` (the agent did not
@@ -106,10 +112,35 @@ OKF /wiki-update summary
   Created by agent:
     + playbooks/incident
   Ignored:
-    - notes/old.docx (unsupported file type)
+    - notes/old.doc (unsupported file type)
   Leftover in input/ (agent did not finish):
     ! reports/q3.md
 ```
+
+## Supported formats
+
+| Bucket | Extensions | How they reach the agent |
+| --- | --- | --- |
+| Conformant (deterministic) | `.md` with frontmatter `type` | Copied to `wiki/` directly, no LLM. |
+| Plain text (read directly) | `.txt`, `.csv`, `.json` | Pi's `read` tool. |
+| Images (vision) | `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.bmp` | Pi's `read` tool. |
+| Extracted to text | `.pdf`, `.docx`, `.pptx`, `.xlsx`, `.odt`, `.html`/`.htm`, `.epub`, `.rtf` | Pre-extracted to `input/.okf-extract/<rel-dir>/<stem>-extracted.txt`; the agent reads that. The original is archived; a copy of the extracted text is archived next to it. |
+
+Extraction libraries (runtime dependencies of the extension):
+
+| Format | Library |
+| --- | --- |
+| `.pdf` | [`unpdf`](https://www.npmjs.com/package/unpdf) |
+| `.docx` | [`mammoth`](https://www.npmjs.com/package/mammoth) |
+| `.xlsx` | [`exceljs`](https://www.npmjs.com/package/exceljs) (rendered as markdown tables) |
+| `.pptx` / `.odt` / `.epub` | [`jszip`](https://www.npmjs.com/package/jszip) + an XML-text stripper |
+| `.html` | [`html-to-text`](https://www.npmjs.com/package/html-to-text) |
+| `.rtf` | dependency-free RTF stripper (control words + destination groups) |
+
+Extraction failures are reported with a stable code and never archive the
+original: `encrypted` (password-protected), `empty` (no extractable text),
+`extraction_failed` (library error), `io_failed` (read/write error).
+Unsupported types and reserved filenames are `unsupported` / `reserved`.
 
 ### Safety invariant
 
@@ -204,21 +235,34 @@ transformed content automatically; edit `prompts.ts` to change that behavior.
 
 ## Architecture
 
-Single-layer TypeScript extension, strictly typed with no `any`. Filesystem
-and wiki operations return a `Result<T>` (success/error) and never throw to
-callers. There is no AppModel/Dto layering — the extension is intentionally
-thin.
+A TypeScript extension, strictly typed with no `any`. Filesystem, wiki, and
+extraction operations return a `Result<T>` (success/error) and never throw to
+callers. Per the project's `AGENTS.md`, document extraction follows the
+Repository pattern: each format family has a `DocumentExtractorRepository`
+that wraps a third-party library, converts the library's native Dto to the
+`ExtractedText` AppModel, and returns `Result<ExtractedText>`. The Dto never
+leaks outside its repository.
 
 | File | Responsibility |
 | --- | --- |
 | `index.ts` | Registers the `/wiki-update` and `/wiki-query` commands and the `agent_end` finalize hook. |
-| `types.ts` | `Result<T>`, `AppError`, and OKF domain models. |
+| `types.ts` | `Result<T>`, `AppError`, OKF domain models, and the `IgnoreReason` code union. |
 | `frontmatter.ts` | Minimal YAML frontmatter parser for the OKF subset. |
-| `files.ts` | Filesystem helpers, all returning `Result<T>`. |
+| `files.ts` | Filesystem helpers, all returning `Result<T>` (incl. `copyFile`, `removeDir`). |
 | `wiki.ts` | Concept loading, snapshot/diff, `index.md`/`log.md` generation, structure preview, term-frequency retrieval. |
 | `prompts.ts` | Agent prompt builders for ingestion and query. |
-| `update.ts` | `/wiki-update` command logic + finalize. |
+| `update.ts` | `/wiki-update` command logic, extraction pass, and finalize. |
 | `query.ts` | `/wiki-query` command logic. |
+| `extract/types.ts` | `ExtractedText` AppModel, `DocumentExtractorRepository` interface, extraction-failure cause codes. |
+| `extract/pdf.ts` | `PdfRepository` (`unpdf`). |
+| `extract/docx.ts` | `DocxRepository` (`mammoth`). |
+| `extract/sheet.ts` | `SheetRepository` (`exceljs`), rendering worksheets as markdown tables. |
+| `extract/office-xml.ts` | `PptxRepository`, `OdtRepository`, `EpubRepository` (shared `jszip` + XML helpers, EPUB spine-order). |
+| `extract/html.ts` | `HtmlRepository` (`html-to-text`). |
+| `extract/rtf.ts` | `RtfRepository` (dependency-free RTF stripper). |
+| `extract/registry.ts` | Format taxonomy + `ExtractorRegistry` dispatch. |
+| `extract/service.ts` | Extraction-to-temp-file orchestration and the `.okf-extract/` lifecycle. |
+| `extract/util.ts` | Shared `Result<T>` failure + error-message helpers for repositories. |
 
 ### Development
 

@@ -14,7 +14,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 import {
-  READABLE_NON_MD_EXTENSIONS,
+  type IgnoreReason,
   type InputFile,
   type Result,
   type UpdateReport,
@@ -43,6 +43,18 @@ import {
   type WikiPaths,
 } from "./wiki.ts";
 import { buildUpdatePrompt } from "./prompts.ts";
+import {
+  EXTRACTABLE_EXTENSIONS,
+  IMAGE_EXTENSIONS,
+  TEXT_READABLE_EXTENSIONS,
+} from "./extract/registry.ts";
+import {
+  archiveExtractedText,
+  cleanExtractionTemp,
+  cleanupExtractionTemp,
+  extractToTempFile,
+  type ExtractedArtifact,
+} from "./extract/service.ts";
 
 const RESERVED_INPUT = new Set(["index.md", "log.md"]);
 
@@ -52,7 +64,8 @@ interface FinalizeState {
   readonly beforeCount: number;
   readonly conformantImported: readonly string[];
   readonly nonConformant: readonly InputFile[];
-  readonly ignored: ReadonlyArray<{ path: string; reason: string }>;
+  readonly ignored: ReadonlyArray<{ path: string; reason: IgnoreReason; detail?: string }>;
+  readonly warnings: readonly string[];
   readonly today: string;
   readonly hadAgentTurn: boolean;
 }
@@ -80,21 +93,37 @@ export async function runUpdate(
   const inputFiles = await collectInputFiles(paths.input);
   if (!inputFiles.success) return inputFiles;
 
+  const runWarnings: string[] = [];
+
   if (inputFiles.data.length === 0) {
     ctx.ui.notify("input/ is empty — nothing to update.", "info");
     return ok(emptyReport(beforeCount));
   }
 
   const classified = classifyInput(inputFiles.data);
-  const ignored: InputFile[] = classified.filter(
+  let ignored: InputFile[] = classified.filter(
     (file) => file.classification === "ignored",
   );
   const conformant = classified.filter(
     (file) => file.classification === "conformant",
   );
-  const nonConformant = classified.filter(
+  let nonConformant = classified.filter(
     (file) => file.classification === "non-conformant",
   );
+
+  // 0. Extract binary/structured formats (pdf, docx, xlsx, pptx, odt, epub,
+  //    html) to a temp `<stem>-extracted.txt` the agent reads instead of the
+  //    binary. Clean any stale temp from an interrupted previous run first.
+  //    (Non-fatal: a failure here just means stale temp may survive until the
+  //    next run; listFiles skips `.okf-extract` and tempRelativeNameFor
+  //    overwrites same-named files, so ingestion still works.)
+  const cleaned = await cleanExtractionTemp(paths.input);
+  if (!cleaned.success) {
+    runWarnings.push(`Could not clean extraction temp: ${cleaned.error.message}`);
+  }
+  const extraction = await runExtractionPass(paths, nonConformant);
+  nonConformant = [...extraction.nonConformant];
+  ignored = [...ignored, ...extraction.ignored];
 
   // 1. Conformant candidates: confirm by parsing frontmatter. A .md that turns
   //    out to lack frontmatter/type is NOT ignored — it is non-conformant and
@@ -111,7 +140,8 @@ export async function runUpdate(
       ignored.push({
         ...file,
         classification: "ignored",
-        ignoreReason: result.error.message,
+        ignoreReason: "io_failed",
+        ignoreDetail: result.error.message,
       });
     }
   }
@@ -119,7 +149,8 @@ export async function runUpdate(
 
   const ignoredEntries = ignored.map((file) => ({
     path: file.relativePath,
-    reason: file.ignoreReason ?? "unknown",
+    reason: file.ignoreReason ?? "unsupported",
+    detail: file.ignoreDetail,
   }));
 
   // 2. Non-conformant files: delegate to the agent, finalize on agent_end.
@@ -135,6 +166,8 @@ export async function runUpdate(
           relativePath: file.relativePath,
           absolutePath: file.absolutePath,
           archiveTarget: await resolveArchiveTarget(paths.archive, file.relativePath),
+          extractedTextPath: file.extractedTextPath,
+          sourceFormat: file.sourceFormat,
         })),
       ),
       archiveDir: paths.archive,
@@ -149,6 +182,7 @@ export async function runUpdate(
       conformantImported,
       nonConformant: allNonConformant,
       ignored: ignoredEntries,
+      warnings: runWarnings,
       today,
       hadAgentTurn: true,
     };
@@ -169,6 +203,7 @@ export async function runUpdate(
     conformantImported,
     nonConformant: allNonConformant,
     ignored: ignoredEntries,
+    warnings: runWarnings,
     today,
     hadAgentTurn: false,
   });
@@ -187,7 +222,8 @@ async function finalizeUpdate(
   ctx: ExtensionContext,
   state: FinalizeState,
 ): Promise<UpdateReport> {
-  const { paths, beforeSnapshot, beforeCount, conformantImported, nonConformant, ignored, today } = state;
+  const { paths, beforeSnapshot, beforeCount, conformantImported, nonConformant, ignored, warnings: stateWarnings, today } = state;
+  const warnings: string[] = [...stateWarnings];
 
   const afterSnapshot = await snapshotWiki(paths.wiki);
   const afterEntries = afterSnapshot.success ? afterSnapshot.data.entries : new Map<string, string>();
@@ -200,6 +236,23 @@ async function finalizeUpdate(
   await appendLogMd(paths.wiki, today, diff);
 
   const leftover = await detectLeftover(paths.input, nonConformant);
+  const leftoverSet = new Set(leftover);
+
+  // Archive the extracted text for every file the agent successfully archived
+  // (i.e. not leftover). Leftover originals keep their temp text only until the
+  // cleanup below removes it — it is regenerated on the next run.
+  for (const file of nonConformant) {
+    if (file.tempRelativeName === undefined) continue;
+    if (leftoverSet.has(file.relativePath)) continue;
+    const archived = await archiveExtractedText(paths.input, paths.archive, file.tempRelativeName, resolveArchiveTarget);
+    if (!archived.success) {
+      warnings.push(`Could not archive extracted text for ${file.relativePath}: ${archived.error.message}`);
+    }
+  }
+  const cleaned = await cleanupExtractionTemp(paths.input);
+  if (!cleaned.success) {
+    warnings.push(`Could not clean extraction temp: ${cleaned.error.message}`);
+  }
 
   const report: UpdateReport = {
     conformantImported,
@@ -211,6 +264,7 @@ async function finalizeUpdate(
     wikiConceptCountBefore: beforeCount,
     wikiConceptCountAfter: afterEntries.size,
     hadAgentTurn: state.hadAgentTurn,
+    warnings,
   };
 
   ctx.ui.setStatus("okf-update", "");
@@ -248,16 +302,92 @@ function classifyInput(files: readonly InputFile[]): InputFile[] {
 function classifyOne(file: InputFile): InputFile {
   const name = basename(file.relativePath);
   if (RESERVED_INPUT.has(name)) {
-    return { ...file, classification: "ignored", ignoreReason: "reserved filename" };
+    return { ...file, classification: "ignored", ignoreReason: "reserved" };
   }
-  if (file.relativePath.endsWith(".md")) {
+  const lower = file.relativePath.toLowerCase();
+  if (lower.endsWith(".md")) {
     // Conformance is confirmed in importConformant by parsing frontmatter.
     return { ...file, classification: "conformant" };
   }
-  if (READABLE_NON_MD_EXTENSIONS.some((ext) => file.relativePath.toLowerCase().endsWith(ext))) {
+  if (
+    matchesAny(lower, TEXT_READABLE_EXTENSIONS) ||
+    matchesAny(lower, IMAGE_EXTENSIONS) ||
+    matchesAny(lower, EXTRACTABLE_EXTENSIONS)
+  ) {
+    // Extractable formats are refined by runExtractionPass below (they become
+    // non-conformant with an `extractedTextPath`, or ignored on extraction
+    // failure). Text-readable and image formats are read directly by the agent.
     return { ...file, classification: "non-conformant" };
   }
-  return { ...file, classification: "ignored", ignoreReason: "unsupported file type" };
+  return { ...file, classification: "ignored", ignoreReason: "unsupported" };
+}
+
+/**
+ * Run extractors for every non-conformant file whose extension is extractable.
+ * Success -> attach the temp `extractedTextPath` (agent reads that instead of
+ * the binary). Failure -> demote to `ignored` with a stable cause code.
+ */
+async function runExtractionPass(
+  paths: WikiPaths,
+  files: readonly InputFile[],
+): Promise<{ readonly nonConformant: readonly InputFile[]; readonly ignored: readonly InputFile[] }> {
+  const refined: InputFile[] = [];
+  const newlyIgnored: InputFile[] = [];
+  for (const file of files) {
+    if (!matchesAny(file.relativePath.toLowerCase(), EXTRACTABLE_EXTENSIONS)) {
+      refined.push(file);
+      continue;
+    }
+    const result = await extractToTempFile(paths.input, file.relativePath, file.absolutePath);
+    if (result.success) {
+      const artifact: ExtractedArtifact = result.data;
+      refined.push({
+        ...file,
+        extractedTextPath: artifact.extractedTextPath,
+        tempRelativeName: artifact.tempRelativeName,
+        sourceFormat: artifact.sourceFormat,
+      });
+    } else {
+      newlyIgnored.push({
+        ...file,
+        classification: "ignored",
+        ignoreReason: asIgnoreReason(result.error.cause) ?? "extraction_failed",
+        ignoreDetail: result.error.message,
+      });
+    }
+  }
+  return { nonConformant: refined, ignored: newlyIgnored };
+}
+
+function matchesAny(lowerPath: string, extensions: readonly string[]): boolean {
+  return extensions.some((extension) => lowerPath.endsWith(extension));
+}
+
+function asIgnoreReason(cause: string | undefined): IgnoreReason | undefined {
+  // Only extraction-related causes flow through this path; `io_failed` is set
+  // directly by importConformant and never arrives here.
+  if (cause === "encrypted" || cause === "extraction_failed" || cause === "empty") {
+    return cause;
+  }
+  return undefined;
+}
+
+/** Short English phrase for the summary widget. The structured report keeps the code. */
+function describeIgnoreReason(reason: IgnoreReason): string {
+  switch (reason) {
+    case "unsupported":
+      return "unsupported file type";
+    case "reserved":
+      return "reserved filename";
+    case "encrypted":
+      return "encrypted document";
+    case "extraction_failed":
+      return "extraction failed";
+    case "empty":
+      return "no extractable text";
+    case "io_failed":
+      return "read/write failed";
+  }
 }
 
 async function importConformant(
@@ -307,6 +437,7 @@ function emptyReport(conceptCount: number): UpdateReport {
     wikiConceptCountBefore: conceptCount,
     wikiConceptCountAfter: conceptCount,
     hadAgentTurn: false,
+    warnings: [],
   };
 }
 
@@ -335,11 +466,18 @@ function showSummary(ctx: ExtensionContext, report: UpdateReport): void {
   }
   if (report.ignored.length > 0) {
     lines.push("  Ignored:");
-    for (const entry of report.ignored) lines.push(`    - ${entry.path} (${entry.reason})`);
+    for (const entry of report.ignored) {
+      const detail = entry.detail ? `: ${entry.detail}` : "";
+      lines.push(`    - ${entry.path} (${describeIgnoreReason(entry.reason)}${detail})`);
+    }
   }
   if (report.leftover.length > 0) {
     lines.push("  Leftover in input/ (agent did not finish):");
     for (const path of report.leftover) lines.push(`    ! ${path}`);
+  }
+  if (report.warnings.length > 0) {
+    lines.push("  Warnings:");
+    for (const warning of report.warnings) lines.push(`    ! ${warning}`);
   }
   ctx.ui.setWidget("okf-update", lines);
   ctx.ui.notify(

@@ -34,8 +34,12 @@ export interface UpdatePromptInput {
   readonly inputFiles: ReadonlyArray<{
     relativePath: string;
     absolutePath: string;
-    /** Precomputed, collision-free archive destination for this file. */
+    /** Precomputed, collision-free archive destination for the ORIGINAL file. */
     archiveTarget: string;
+    /** When set, the agent reads this extracted `.txt` instead of the binary original. */
+    extractedTextPath?: string;
+    /** Source format id when extracted (e.g. "docx"). */
+    sourceFormat?: string;
   }>;
   readonly archiveDir: string;
   readonly wikiDir: string;
@@ -44,10 +48,12 @@ export interface UpdatePromptInput {
 
 export function buildUpdatePrompt(input: UpdatePromptInput): string {
   const fileList = input.inputFiles
-    .map(
-      (file) =>
-        `- input/${file.relativePath} (absolute: ${file.absolutePath}) -> archive to: ${file.archiveTarget}`,
-    )
+    .map((file) => {
+      if (file.extractedTextPath !== undefined) {
+        return `- input/${file.relativePath} (source format: ${file.sourceFormat ?? "unknown"}; READ extracted text: ${file.extractedTextPath}) -> archive ORIGINAL to: ${file.archiveTarget}`;
+      }
+      return `- input/${file.relativePath} (READ directly: ${file.absolutePath}) -> archive to: ${file.archiveTarget}`;
+    })
     .join("\n");
   const dirs = input.structure.directories.length > 0
     ? input.structure.directories.join(", ")
@@ -71,7 +77,12 @@ Existing wiki structure:
 The following input files are NOT yet OKF-conformant.
 
 STEP 0 — Cluster inputs by the entity they describe (BEFORE assigning concept IDs):
-- Read every input file first (use the read tool; it handles .md, .txt, .pdf, and images).
+- Read every input file first. For binary/structured formats (pdf, docx, xlsx,
+  pptx, odt, epub, html, rtf) an extracted plain-text file has already been
+  written for you — READ THE EXTRACTED TEXT path listed for that input, NOT the
+  binary original. For plain text (.txt, .csv, .json), markdown, and images,
+  read the original file directly with the read tool (images are read via
+  vision).
 - Group files that describe the SAME real-world entity. Match on the asserted
   name (e.g. "ALG-32"), canonical resource, or distinctive keywords — NOT on the
   input filename. Files named like foo-2.txt / foo-3.txt are usually VERSIONS of

@@ -41,12 +41,36 @@ export interface Concept {
 /** Classification of a single input file. */
 export type InputClassification = "conformant" | "non-conformant" | "ignored";
 
+/**
+ * Stable, machine-readable reason an input file was ignored. The app layer
+ * translates these for the UI; the extension's own summary widget renders a
+ * short English phrase via `describeIgnoreReason` in `update.ts`.
+ */
+export type IgnoreReason =
+  | "unsupported"
+  | "reserved"
+  | "encrypted"
+  | "extraction_failed"
+  | "empty"
+  | "io_failed";
+
 export interface InputFile {
   readonly relativePath: string; // relative to input/, with extension
   readonly absolutePath: string;
   readonly classification: InputClassification;
   readonly frontmatter?: Frontmatter;
-  readonly ignoreReason?: string;
+  readonly ignoreReason?: IgnoreReason;
+  /** Human-readable detail for an ignored file (e.g. the underlying lib error). */
+  readonly ignoreDetail?: string;
+  /**
+   * Absolute path to a temp extracted `.txt` the agent should read INSTEAD of
+   * `absolutePath`. Set only for binary formats that were successfully extracted.
+   */
+  readonly extractedTextPath?: string;
+  /** Path of the extracted text relative to `.okf-extract/` (e.g. `notes/foo-extracted.txt`). */
+  readonly tempRelativeName?: string;
+  /** Source format id when extracted (e.g. "docx"). */
+  readonly sourceFormat?: string;
 }
 
 /** Snapshot of the wiki used for diffing before/after an update. */
@@ -57,23 +81,13 @@ export interface WikiSnapshot {
 export interface UpdateReport {
   readonly conformantImported: readonly string[]; // concept ids
   readonly nonConformantHandedToAgent: readonly string[]; // input relative paths
-  readonly ignored: ReadonlyArray<{ path: string; reason: string }>;
+  readonly ignored: ReadonlyArray<{ path: string; reason: IgnoreReason; detail?: string }>;
   readonly leftover: readonly string[]; // input files still present after run
   readonly createdConcepts: readonly string[];
   readonly updatedConcepts: readonly string[];
   readonly wikiConceptCountBefore: number;
   readonly wikiConceptCountAfter: number;
   readonly hadAgentTurn: boolean;
+  /** Non-fatal issues surfaced to the user (e.g. temp-dir cleanup failures). */
+  readonly warnings: readonly string[];
 }
-
-/** File extensions the `read` tool can extract, so we hand them to the agent. */
-export const READABLE_NON_MD_EXTENSIONS = [
-  ".txt",
-  ".pdf",
-  ".png",
-  ".jpg",
-  ".jpeg",
-  ".gif",
-  ".webp",
-  ".bmp",
-] as const;

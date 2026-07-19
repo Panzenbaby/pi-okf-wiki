@@ -1,7 +1,7 @@
 // Filesystem helpers wrapped in Result<T>. No exceptions leak to callers.
 
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
+import { copyFile as copyFileFn, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import { err, ok, type Result } from "./types.ts";
 
@@ -55,6 +55,36 @@ export async function moveFile(
     return ok(undefined);
   } catch (error) {
     return err<void>(`Failed to move ${source} -> ${destination}`, {
+      path: source,
+      cause: errorMessage(error),
+    });
+  }
+}
+
+/** Recursively remove a directory tree (no error if it does not exist). */
+export async function removeDir(path: string): Promise<Result<void>> {
+  try {
+    await rm(path, { recursive: true, force: true });
+    return ok(undefined);
+  } catch (error) {
+    return err<void>(`Failed to remove directory ${path}`, {
+      path,
+      cause: errorMessage(error),
+    });
+  }
+}
+
+/** Copy a file, creating destination parent directories. */
+export async function copyFile(
+  source: string,
+  destination: string,
+): Promise<Result<void>> {
+  try {
+    await mkdir(join(destination, ".."), { recursive: true });
+    await copyFileFn(source, destination);
+    return ok(undefined);
+  } catch (error) {
+    return err<void>(`Failed to copy ${source} -> ${destination}`, {
       path: source,
       cause: errorMessage(error),
     });
@@ -134,6 +164,9 @@ export async function listFiles(root: string): Promise<Result<readonly FileEntry
     for (const entry of entries) {
       const absolutePath = join(dir, entry.name);
       if (entry.isDirectory()) {
+        // Skip the extraction temp dir so extracted text is never re-walked as
+        // new input on the next /wiki-update.
+        if (entry.name === ".okf-extract") continue;
         const sub = await walk(absolutePath);
         if (!sub.success) return sub;
         continue;
