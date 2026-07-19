@@ -250,7 +250,11 @@ leaks outside its repository.
 | `session.ts` | `Session` interface and the generic `SessionRegistry<T>` that owns the single-slot handoff between a command handler and an event hook. |
 | `frontmatter.ts` | Minimal YAML frontmatter parser for the OKF subset. |
 | `files.ts` | Filesystem helpers, all returning `Result<T>` (incl. `copyFile`, `removeDir`). |
-| `wiki.ts` | Concept loading, snapshot/diff, `index.md`/`log.md` generation, structure preview, term-frequency retrieval. |
+| `wiki.ts` | Barrel re-exporting the `wiki/` modules so the `./wiki.ts` import surface stays stable for `update.ts`, `query.ts`, `classifier.ts`, and `prompts.ts`. |
+| `wiki/paths.ts` | `wikiPaths`, `conceptIdFromRelativePath`, `isConceptFile`, `relativePosix`, `WikiPaths`. |
+| `wiki/concepts.ts` | Concept loading (`loadConcept`, `loadAllConcepts`), snapshot/diff (`snapshotWiki`, `diffSnapshots`, `WikiDiff`). |
+| `wiki/index-log.ts` | `index.md` / `log.md` generation (`generateIndexMd`, `writeIndexMd`, `appendLogMd`, `buildLogEntry`). |
+| `wiki/retrieval.ts` | Structure preview and term-frequency retrieval (`retrieveConcepts`, `tokenize`, `renderConceptForPrompt`, `renderWikiTree`, `displayTitle`, `buildStructurePreview`, `TERM_STOPWORDS`). |
 | `prompts.ts` | Agent prompt builders for ingestion and query. |
 | `update.ts` | `/wiki-update` command logic and the `IntakeSession` (finalize) that owns the agent-handoff state. |
 | `classifier.ts` | `InputClassifier` that owns the full input→bucket pipeline AND the deterministic conformant intake: tentative dispatch by extension, the extraction pass (staging extracted text), and pass 3 — read + verify frontmatter + write to `wiki/` + archive original — for conformant `.md` files. Emits the three final buckets (`conformantImported` / `forAgent` / `ignored`) once, in input order. |

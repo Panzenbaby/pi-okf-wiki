@@ -20,6 +20,7 @@
     "frontmatter.ts",
     "files.ts",
     "wiki.ts",
+    "wiki/",
     "prompts.ts",
     "update.ts",
     "classifier.ts",
