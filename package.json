@@ -22,6 +22,7 @@
     "wiki.ts",
     "prompts.ts",
     "update.ts",
+    "classifier.ts",
     "query.ts",
     "session.ts",
     "extract/",

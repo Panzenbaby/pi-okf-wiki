@@ -20,22 +20,17 @@ import {
   type UpdateReport,
   type WikiSnapshot,
 } from "./types.ts";
-import { ok, err } from "./types.ts";
+import { ok } from "./types.ts";
 import { SessionRegistry, type Session } from "./session.ts";
-import { parseDocument } from "./frontmatter.ts";
 import {
   ensureDir,
   listFiles,
-  moveFile,
   pathExists,
-  readTextFile,
   resolveArchiveTarget,
-  writeTextFile,
 } from "./files.ts";
 import {
   appendLogMd,
   buildStructurePreview,
-  conceptIdFromRelativePath,
   diffSnapshots,
   loadAllConcepts,
   snapshotWiki,
@@ -45,19 +40,14 @@ import {
 } from "./wiki.ts";
 import { buildUpdatePrompt } from "./prompts.ts";
 import {
-  EXTRACTABLE_EXTENSIONS,
-  IMAGE_EXTENSIONS,
-  TEXT_READABLE_EXTENSIONS,
-} from "./extract/registry.ts";
-import {
   archiveExtractedText,
   cleanExtractionTemp,
   cleanupExtractionTemp,
-  extractToTempFile,
-  type ExtractedArtifact,
 } from "./extract/service.ts";
-
-const RESERVED_INPUT = new Set(["index.md", "log.md"]);
+import {
+  createClassifier,
+  type IgnoredEntry,
+} from "./classifier.ts";
 
 /**
  * Immutable snapshot of the deterministic-phase state an IntakeSession owns.
@@ -69,7 +59,7 @@ interface IntakeSessionState {
   readonly beforeCount: number;
   readonly conformantImported: readonly string[];
   readonly nonConformant: readonly InputFile[];
-  readonly ignored: ReadonlyArray<{ path: string; reason: IgnoreReason; detail?: string }>;
+  readonly ignored: readonly IgnoredEntry[];
   readonly warnings: readonly string[];
   readonly today: string;
 }
@@ -96,7 +86,7 @@ class IntakeSessionImpl implements IntakeSession {
   private readonly beforeCount: number;
   private readonly conformantImported: readonly string[];
   private readonly nonConformant: readonly InputFile[];
-  private readonly ignored: ReadonlyArray<{ path: string; reason: IgnoreReason; detail?: string }>;
+  private readonly ignored: readonly IgnoredEntry[];
   private readonly warnings: readonly string[];
   private readonly today: string;
 
@@ -230,72 +220,46 @@ export async function runUpdate(
     return ok(emptyReport(beforeCount));
   }
 
-  const classified = classifyInput(inputFiles.data);
-  let ignored: InputFile[] = classified.filter(
-    (file) => file.classification === "ignored",
-  );
-  const conformant = classified.filter(
-    (file) => file.classification === "conformant",
-  );
-  let nonConformant = classified.filter(
-    (file) => file.classification === "non-conformant",
-  );
-
-  // 0. Extract binary/structured formats (pdf, docx, xlsx, pptx, odt, epub,
-  //    html) to a temp `<stem>-extracted.txt` the agent reads instead of the
-  //    binary. Clean any stale temp from an interrupted previous run first.
-  //    (Non-fatal: a failure here just means stale temp may survive until the
-  //    next run; listFiles skips `.okf-extract` and tempRelativeNameFor
-  //    overwrites same-named files, so ingestion still works.)
+  // 0. Classification owns the full input -> bucket pipeline AND the
+  //    deterministic conformant intake: tentative classification, the
+  //    extraction pass (which stages extracted text under
+  //    input/.okf-extract/), and pass 3 (read + verify + write to wiki/ +
+  //    archive original for conformant `.md`). It emits the three final
+  //    buckets — conformantImported / forAgent / ignored — once. Clean any
+  //    stale extraction temp from an interrupted previous run first, exactly
+  //    once per run, before the classifier extracts. (Non-fatal: a failure
+  //    here just means stale temp may survive until the next run; listFiles
+  //    skips `.okf-extract` and tempRelativeNameFor overwrites same-named
+  //    files, so ingestion still works.)
   const cleaned = await cleanExtractionTemp(paths.input);
   if (!cleaned.success) {
     runWarnings.push(`Could not clean extraction temp: ${cleaned.error.message}`);
   }
-  const extraction = await runExtractionPass(paths, nonConformant);
-  nonConformant = [...extraction.nonConformant];
-  ignored = [...ignored, ...extraction.ignored];
+  const classifier = createClassifier(paths);
+  const classified = await classifier.classify(inputFiles.data);
+  if (!classified.success) return classified;
+  const { conformantImported, forAgent, ignored } = classified.data;
 
-  // 1. Conformant candidates: confirm by parsing frontmatter. A .md that turns
-  //    out to lack frontmatter/type is NOT ignored — it is non-conformant and
-  //    must be handed to the agent (hybrid ingestion).
-  const conformantImported: string[] = [];
-  const deferredNonConformant: InputFile[] = [];
-  for (const file of conformant) {
-    const result = await importConformant(file, paths);
-    if (result.success) {
-      conformantImported.push(result.data);
-    } else if (result.error.cause === "non-conformant") {
-      deferredNonConformant.push({ ...file, classification: "non-conformant" });
-    } else {
-      ignored.push({
-        ...file,
-        classification: "ignored",
-        ignoreReason: "io_failed",
-        ignoreDetail: result.error.message,
-      });
-    }
-  }
-  const allNonConformant = [...nonConformant, ...deferredNonConformant];
+  // 1. Build the intake-session state. The classifier already deterministically
+  //    imported the conformant `.md` files (write to wiki/ + archive original),
+  //    so there is nothing more to do for them here. `forAgent` already
+  //    includes any deferred `.md` (ones that lacked frontmatter/type).
+  const allNonConformant = forAgent;
+  const allIgnored = ignored;
 
-  const ignoredEntries = ignored.map((file) => ({
-    path: file.relativePath,
-    reason: file.ignoreReason ?? "unsupported",
-    detail: file.ignoreDetail,
-  }));
-
-  // 2. Non-conformant files: delegate to the agent, finalize on agent_end.
   const sessionState: IntakeSessionState = {
     paths,
     beforeSnapshot: beforeSnapshot.data,
     beforeCount,
     conformantImported,
     nonConformant: allNonConformant,
-    ignored: ignoredEntries,
+    ignored: allIgnored,
     warnings: runWarnings,
     today,
   };
 
   if (allNonConformant.length > 0) {
+    // 2. Non-conformant files: delegate to the agent, finalize on agent_end.
     const conceptsBefore = await loadAllConcepts(paths.wiki);
     const structure = conceptsBefore.success
       ? buildStructurePreview(conceptsBefore.data)
@@ -328,7 +292,7 @@ export async function runUpdate(
     return ok(emptyReport(beforeCount));
   }
 
-  // 3. No agent turn: finalize synchronously now.
+  // 2. No agent turn: finalize synchronously now.
   const session = new IntakeSessionImpl(sessionState);
   const report = await session.finalize(ctx);
   return ok(report);
@@ -357,83 +321,6 @@ async function collectInputFiles(
   );
 }
 
-function classifyInput(files: readonly InputFile[]): InputFile[] {
-  return files.map((file) => classifyOne(file));
-}
-
-function classifyOne(file: InputFile): InputFile {
-  const name = basename(file.relativePath);
-  if (RESERVED_INPUT.has(name)) {
-    return { ...file, classification: "ignored", ignoreReason: "reserved" };
-  }
-  const lower = file.relativePath.toLowerCase();
-  if (lower.endsWith(".md")) {
-    // Conformance is confirmed in importConformant by parsing frontmatter.
-    return { ...file, classification: "conformant" };
-  }
-  if (
-    matchesAny(lower, TEXT_READABLE_EXTENSIONS) ||
-    matchesAny(lower, IMAGE_EXTENSIONS) ||
-    matchesAny(lower, EXTRACTABLE_EXTENSIONS)
-  ) {
-    // Extractable formats are refined by runExtractionPass below (they become
-    // non-conformant with an `extractedTextPath`, or ignored on extraction
-    // failure). Text-readable and image formats are read directly by the agent.
-    return { ...file, classification: "non-conformant" };
-  }
-  return { ...file, classification: "ignored", ignoreReason: "unsupported" };
-}
-
-/**
- * Run extractors for every non-conformant file whose extension is extractable.
- * Success -> attach the temp `extractedTextPath` (agent reads that instead of
- * the binary). Failure -> demote to `ignored` with a stable cause code.
- */
-async function runExtractionPass(
-  paths: WikiPaths,
-  files: readonly InputFile[],
-): Promise<{ readonly nonConformant: readonly InputFile[]; readonly ignored: readonly InputFile[] }> {
-  const refined: InputFile[] = [];
-  const newlyIgnored: InputFile[] = [];
-  for (const file of files) {
-    if (!matchesAny(file.relativePath.toLowerCase(), EXTRACTABLE_EXTENSIONS)) {
-      refined.push(file);
-      continue;
-    }
-    const result = await extractToTempFile(paths.input, file.relativePath, file.absolutePath);
-    if (result.success) {
-      const artifact: ExtractedArtifact = result.data;
-      refined.push({
-        ...file,
-        extractedTextPath: artifact.extractedTextPath,
-        tempRelativeName: artifact.tempRelativeName,
-        sourceFormat: artifact.sourceFormat,
-      });
-    } else {
-      newlyIgnored.push({
-        ...file,
-        classification: "ignored",
-        ignoreReason: asIgnoreReason(result.error.cause) ?? "extraction_failed",
-        ignoreDetail: result.error.message,
-      });
-    }
-  }
-  return { nonConformant: refined, ignored: newlyIgnored };
-}
-
-function matchesAny(lowerPath: string, extensions: readonly string[]): boolean {
-  return extensions.some((extension) => lowerPath.endsWith(extension));
-}
-
-function asIgnoreReason(cause: string | undefined): IgnoreReason | undefined {
-  // Only extraction-related causes flow through this path; `io_failed` is set
-  // directly by importConformant and never arrives here.
-  if (cause === "encrypted" || cause === "extraction_failed" || cause === "empty") {
-    return cause;
-  }
-  return undefined;
-}
-
 /** Short English phrase for the summary widget. The structured report keeps the code. */
 function describeIgnoreReason(reason: IgnoreReason): string {
   switch (reason) {
@@ -450,29 +337,6 @@ function describeIgnoreReason(reason: IgnoreReason): string {
     case "io_failed":
       return "read/write failed";
   }
-}
-
-async function importConformant(
-  file: InputFile,
-  paths: WikiPaths,
-): Promise<Result<string>> {
-  const content = await readTextFile(file.absolutePath);
-  if (!content.success) return content;
-  const parsed = parseDocument(content.data);
-  if (!parsed.frontmatter || !parsed.frontmatter.type) {
-    return err<string>("missing frontmatter or type field", {
-      path: file.relativePath,
-      cause: "non-conformant",
-    });
-  }
-  const targetPath = `${paths.wiki}/${file.relativePath}`;
-  const writeResult = await writeTextFile(targetPath, content.data);
-  if (!writeResult.success) return writeResult;
-  // Archive collision-safe: never overwrite an existing archive file.
-  const archivePath = await resolveArchiveTarget(paths.archive, file.relativePath);
-  const moveResult = await moveFile(file.absolutePath, archivePath);
-  if (!moveResult.success) return moveResult;
-  return ok(conceptIdFromRelativePath(file.relativePath));
 }
 
 async function detectLeftover(
@@ -546,9 +410,4 @@ function showSummary(ctx: ExtensionContext, report: UpdateReport): void {
     `/wiki-update done: ${report.createdConcepts.length + report.conformantImported.length} new, ${report.updatedConcepts.length} updated, ${report.leftover.length} leftover.`,
     "info",
   );
-}
-
-function basename(path: string): string {
-  const idx = path.lastIndexOf("/");
-  return idx === -1 ? path : path.slice(idx + 1);
 }
