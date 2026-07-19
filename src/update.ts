@@ -28,6 +28,7 @@ import {
   listFiles,
   pathExists,
   readTextFile,
+  removeEmptyDirs,
   resolveArchiveTarget,
   writeTextFile,
 } from "./files.ts";
@@ -53,6 +54,13 @@ import {
   type IgnoredEntry,
 } from "./classifier.ts";
 import { compileArchiveRewriter } from "./links.ts";
+
+/**
+ * Skip predicate shared by the input walkers: hide the extraction temp dir
+ * staged inside `input/`. Hoisted to module level so every call site passes
+ * the same identity instead of allocating a fresh closure.
+ */
+const skipExtractionTemp = (name: string): boolean => name === EXTRACTION_TEMP_DIR;
 
 /**
  * Immutable snapshot of the deterministic-phase state an IntakeSession owns.
@@ -193,6 +201,14 @@ class IntakeSessionImpl implements IntakeSession {
     const cleaned = await cleanupExtractionTemp(this.paths.input);
     if (!cleaned.success) {
       warnings.push(`Could not clean extraction temp: ${cleaned.error.message}`);
+    }
+
+    // Prune now-empty directories the agent left behind in input/ after
+    // moving every original to the archive. The temp dir is already gone
+    // (see cleanup above), but `skip` guards against a stale one anyway.
+    const pruned = await removeEmptyDirs(this.paths.input, skipExtractionTemp);
+    if (!pruned.success) {
+      warnings.push(`Could not prune empty input folders: ${pruned.error.message}`);
     }
 
     const report: UpdateReport = {
@@ -430,7 +446,7 @@ async function collectInputFiles(
   inputRoot: string,
 ): Promise<Result<readonly InputFile[]>> {
   if (!(await pathExists(inputRoot))) return ok([]);
-  const files = await listFiles(inputRoot, (name) => name === EXTRACTION_TEMP_DIR);
+  const files = await listFiles(inputRoot, skipExtractionTemp);
   if (!files.success) return files;
   return ok(
     files.data.map((file) => ({
@@ -464,7 +480,7 @@ async function detectLeftover(
   nonConformant: readonly InputFile[],
 ): Promise<readonly string[]> {
   const expected = new Set(nonConformant.map((file) => file.relativePath));
-  const files = await listFiles(inputRoot, (name) => name === EXTRACTION_TEMP_DIR);
+  const files = await listFiles(inputRoot, skipExtractionTemp);
   if (!files.success) return [];
   return files.data
     .filter((file) => expected.has(file.relativePath))

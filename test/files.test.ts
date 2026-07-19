@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { listFiles, resolveArchiveTarget } from "../src/files.ts";
+import { listFiles, pathExists, removeEmptyDirs, resolveArchiveTarget } from "../src/files.ts";
 
 let root: string;
 
@@ -91,5 +91,59 @@ describe("resolveArchiveTarget", () => {
     expect(target.startsWith(join(archiveDir, "notes", "spec."))).toBe(true);
     expect(target.endsWith(".pdf")).toBe(true);
     expect(target).not.toContain(".orig");
+  });
+});
+
+describe("removeEmptyDirs", () => {
+  it("removes leaf and nested empty folders but keeps folders that still hold a file", async () => {
+    // input/notes/  (still has a file -> kept)
+    // input/empty/  (no files -> removed)
+    // input/empty/deeper/  (no files -> removed, then `empty` becomes empty -> removed)
+    // input/keepfile/child/  (child holds a file -> kept; keepfile kept)
+    await writeFileRelative("notes/spec.md", "x");
+    await mkdir(join(root, "empty", "deeper"), { recursive: true });
+    await writeFileRelative("keepfile/child/a.md", "a");
+
+    const result = await removeEmptyDirs(root);
+    expect(result.success).toBe(true);
+
+    // Folder with a file is kept.
+    expect(await pathExists(join(root, "notes"))).toBe(true);
+    expect(await pathExists(join(root, "keepfile", "child"))).toBe(true);
+    // Empty folders are gone.
+    expect(await pathExists(join(root, "empty"))).toBe(false);
+    // Root itself is never removed.
+    expect(await pathExists(root)).toBe(true);
+  });
+
+  it("skips directories whose name the predicate returns true for", async () => {
+    // A `.okf-extract` dir is empty but skipped, so it survives.
+    await mkdir(join(root, ".okf-extract", "inner"), { recursive: true });
+    await mkdir(join(root, "reallyempty"), { recursive: true });
+
+    const result = await removeEmptyDirs(root, (name) => name === ".okf-extract");
+    expect(result.success).toBe(true);
+
+    expect(await pathExists(join(root, ".okf-extract"))).toBe(true);
+    expect(await pathExists(join(root, "reallyempty"))).toBe(false);
+  });
+
+  it("returns ok on a missing root (nothing to prune)", async () => {
+    const missing = join(root, "does-not-exist");
+    const result = await removeEmptyDirs(missing);
+    expect(result.success).toBe(true);
+  });
+
+  it("propagates a mid-walk read failure with the offending path", async () => {
+    // Passing a regular file as the root makes the very first readdir throw
+    // ENOTDIR — a genuine read failure (not ENOENT/ENOTEMPTY), which must
+    // surface as !success and reference the offending path.
+    const fileRoot = join(root, "not-a-dir");
+    await writeFile(fileRoot, "i-am-a-file", "utf8");
+
+    const result = await removeEmptyDirs(fileRoot);
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.message).toContain(fileRoot);
   });
 });

@@ -1,7 +1,8 @@
 // Filesystem helpers wrapped in Result<T>. No exceptions leak to callers.
 
 import { createHash } from "node:crypto";
-import { copyFile as copyFileFn, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import type { Dirent } from "node:fs";
+import { copyFile as copyFileFn, mkdir, readFile, readdir, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import { err, ok, type Result } from "./types.ts";
 
@@ -200,6 +201,76 @@ export async function listFiles(
   const result = await walk(root);
   if (!result.success) return result;
   return ok(collected);
+}
+
+/**
+ * Recursively remove empty directories under `root` (post-order). The root
+ * itself is never removed. Directories listed in `skip` (by base name) are
+ * pruned — neither removed nor descended into — so a residual temp dir is
+ * left untouched if the caller has not cleaned it yet. The `skip` signature
+ * matches {@link listFiles} for consistency across the file walkers.
+ *
+ * Used after an ingest run: the agent moves originals from `input/` to the
+ * archive, leaving their parent folders behind. This prunes those now-empty
+ * folders so `input/` is clean for the next run.
+ *
+ * Errors are mapped to `Result`:
+ *  - `ENOTEMPTY` on the final `rmdir` is NOT an error — it just means a
+ *    child appeared between the post-order visit and the remove; the folder
+ *    is left in place.
+ *  - `ENOENT` mid-walk (the dir vanished, e.g. a concurrent process removed
+ *    it) is treated the same way: nothing to prune, move on.
+ *  - Genuine read/remove failures surface as `err` with the offending path.
+ */
+export async function removeEmptyDirs(
+  root: string,
+  skip?: (entryName: string, isDirectory: boolean) => boolean,
+): Promise<Result<void>> {
+  const walk = async (dir: string): Promise<Result<void>> => {
+    let entries: Dirent[];
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch (error) {
+      if (isNotFound(error)) return ok(undefined);
+      return err<void>(`Failed to read directory ${dir}`, {
+        path: dir,
+        cause: errorMessage(error),
+      });
+    }
+    for (const entry of entries) {
+      const isDirectory = entry.isDirectory();
+      if (skip !== undefined && skip(entry.name, isDirectory)) continue;
+      if (!isDirectory) continue;
+      const sub = await walk(join(dir, entry.name));
+      if (!sub.success) return sub;
+    }
+    if (dir === root) return ok(undefined);
+    try {
+      await rmdir(dir);
+    } catch (error) {
+      // Non-empty or already gone: neither is a failure for our purpose.
+      if (isNotEmpty(error) || isNotFound(error)) return ok(undefined);
+      return err<void>(`Failed to remove empty directory ${dir}`, {
+        path: dir,
+        cause: errorMessage(error),
+      });
+    }
+    return ok(undefined);
+  };
+  return walk(root);
+}
+
+function isNotFound(error: unknown): boolean {
+  return isErrorWithCode(error, "ENOENT");
+}
+
+function isNotEmpty(error: unknown): boolean {
+  return isErrorWithCode(error, "ENOTEMPTY");
+}
+
+function isErrorWithCode(error: unknown, code: string): boolean {
+  return typeof error === "object" && error !== null && "code" in error &&
+    (error as { code?: unknown }).code === code;
 }
 
 export async function pathExists(path: string): Promise<boolean> {
