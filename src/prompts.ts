@@ -4,17 +4,40 @@
 
 import type { StructurePreview } from "./wiki.ts";
 
+/**
+ * The archive-citation rule, stated ONCE and interpolated into both OKF_RULES
+ * and the STEP 2 conflict bullet so the two cannot drift apart. Archived
+ * originals are cited in the body `# Citations` section with a
+ * `/archive/<input-relative-path>` placeholder link (original input path,
+ * NOT the renamed archive destination); the finalize step rewrites the
+ * placeholder to the renamed path. `resource:` stays a canonical URI only.
+ */
+const ARCHIVE_CITATION_RULE = `Cite sources under a # Citations heading, numbered [1] [2]. Two kinds:
+  * External source → a normal markdown link to its URL.
+  * Archived original from THIS run → a markdown link of the EXACT form
+    \`[label](/archive/<input-relative-path>)\`, where \`<input-relative-path>\`
+    is the path shown for the source in the file list below (the \`input/...\`
+    prefix stripped). ALWAYS use the ORIGINAL input relative path here, never
+    the precomputed archive destination and never plain text — the system
+    rewrites these links to the actual (collision-renamed) archive path after
+    you move the originals. If the input path contains spaces, wrap the URL in
+    angle brackets so the link stays valid markdown:
+    \`[label](</archive/<input-relative-path with spaces>>)\`. Example: for
+    \`input/notes/spec-v2.pdf\` cite as \`[spec v2](/archive/notes/spec-v2.pdf)\`.
+  NEVER put an archive path in the frontmatter \`resource\` field — \`resource\`
+  holds a canonical URI only; archive originals are cited in # Citations.`;
+
 const OKF_RULES = `OKF (Open Knowledge Format) rules for a concept file:
 - A concept is a markdown file with YAML frontmatter delimited by --- lines.
 - Frontmatter MUST contain a non-empty \`type\` field. Recommended: \`title\`,
-  \`description\`, \`resource\` (canonical URI, optional), \`tags\` (list),
-  \`timestamp\` (ISO 8601). Producers MAY add extra keys (§4.1); consumers
-  preserve them.
+  \`description\`, \`resource\` (canonical URI, optional — NEVER an archive path),
+  \`tags\` (list), \`timestamp\` (ISO 8601). Producers MAY add extra keys (§4.1);
+  consumers preserve them.
 - The body is structural markdown: headings (# Schema, # Examples, # Citations
   where applicable), lists, tables, fenced code blocks.
 - Link related concepts with bundle-relative links like
   [title](/tables/orders.md). Broken links are tolerated.
-- Cite external sources under a # Citations heading, numbered [1] [2].
+- ${ARCHIVE_CITATION_RULE}
 - One concept per real-world entity: do NOT split a single entity into parallel
   concept files just because several input files describe it. Variants,
   versions, and superseded values are expressed INSIDE one concept body, not
@@ -113,9 +136,8 @@ ${input.wikiDir}/<concept-id>.md:
   Make the disagreement visible:
     * Add a # Conflicts (or # Versions) table: one row per source with columns
       for the differing attribute(s), the source value, the source citation,
-      and the source timestamp.
-    * Cite each source under # Citations (numbered [1] [2]), pointing at the
-      archived original or external URL.
+: and the source timestamp.
+    * ${ARCHIVE_CITATION_RULE}
     * Choose a CANONICAL value using temporal precedence (latest timestamp /
       "neueste Version" / "latest" marker wins) and state it explicitly in the
       description and in the # Schema. Mark superseded values as such.

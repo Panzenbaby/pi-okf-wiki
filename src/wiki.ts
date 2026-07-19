@@ -7,6 +7,7 @@ export {
   wikiPaths,
   conceptIdFromRelativePath,
   isConceptFile,
+  relativePosix,
   type WikiPaths,
 } from "./wiki/paths.ts";
 

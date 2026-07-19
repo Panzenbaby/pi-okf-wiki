@@ -27,19 +27,22 @@ import {
   ensureDir,
   listFiles,
   pathExists,
+  readTextFile,
   resolveArchiveTarget,
+  writeTextFile,
 } from "./files.ts";
 import {
   appendLogMd,
   buildStructurePreview,
   diffSnapshots,
   loadAllConcepts,
+  relativePosix,
   snapshotWiki,
   wikiPaths,
   writeIndexMd,
   type WikiPaths,
 } from "./wiki.ts";
-import { buildUpdatePrompt } from "./prompts.ts";
+import { buildUpdatePrompt, type UpdatePromptInput } from "./prompts.ts";
 import {
   archiveExtractedText,
   cleanExtractionTemp,
@@ -49,6 +52,7 @@ import {
   createClassifier,
   type IgnoredEntry,
 } from "./classifier.ts";
+import { compileArchiveRewriter } from "./links.ts";
 
 /**
  * Immutable snapshot of the deterministic-phase state an IntakeSession owns.
@@ -63,6 +67,26 @@ interface IntakeSessionState {
   readonly ignored: readonly IgnoredEntry[];
   readonly warnings: readonly string[];
   readonly today: string;
+  /**
+   * Snapshot of the wiki taken AFTER the deterministic classifier run (so it
+   * already contains the conformant imports) but BEFORE the agent turn. The
+   * finalize citation-link rewriter diffs this against the post-agent snapshot
+   * to get EXACTLY the concepts the agent wrote — excluding conformant imports
+   * the classifier copied verbatim (which never cite this run's archive) AND
+   * catching the case where the agent UPDATES a concept that was also
+   * conformant-imported this run (which a naive `diff(beforeSnapshot, after)`
+   * + conformant-skip would miss).
+   */
+  readonly preAgentSnapshot: WikiSnapshot;
+  /**
+   * Original input relative path (posix) -> actual archive-relative path
+   * (posix, post-rename) for every non-conformant file handed to the agent.
+   * Used by the finalize rewrite to fix `/archive/<input-relative-path>`
+   * placeholder citation links to the renamed archive path. Computed once in
+   * `runUpdate` from the same `resolveArchiveTarget` call that feeds the
+   * prompt, so the agent and the rewriter agree on the destination.
+   */
+  readonly archiveTargets: ReadonlyMap<string, string>;
 }
 
 /**
@@ -90,6 +114,8 @@ class IntakeSessionImpl implements IntakeSession {
   private readonly ignored: readonly IgnoredEntry[];
   private readonly warnings: readonly string[];
   private readonly today: string;
+  private readonly preAgentSnapshot: WikiSnapshot;
+  private readonly archiveTargets: ReadonlyMap<string, string>;
 
   constructor(state: IntakeSessionState) {
     this.id = `intake-${++intakeSessionCounter}`;
@@ -101,6 +127,8 @@ class IntakeSessionImpl implements IntakeSession {
     this.ignored = state.ignored;
     this.warnings = state.warnings;
     this.today = state.today;
+    this.preAgentSnapshot = state.preAgentSnapshot;
+    this.archiveTargets = state.archiveTargets;
   }
 
   handoffToAgent(): void {
@@ -121,6 +149,25 @@ class IntakeSessionImpl implements IntakeSession {
       await writeIndexMd(this.paths.wiki, allConcepts.data);
     }
     await appendLogMd(this.paths.wiki, this.today, diff);
+
+    // Rewrite `/archive/<input-relative-path>` placeholder citation links
+    // in agent-written concepts to the actual (collision-renamed) archive
+    // paths. Only concepts the agent wrote/updated this run are touched —
+    // conformant imports are copied verbatim and do not cite this run's
+    // archive. Failures are non-fatal (logged as warnings): a missed rewrite
+    // leaves a placeholder link, which is still a valid (if unresolvable)
+    // markdown link and never breaks the wiki. The concept set is the AGENT's
+    // writes this run: the diff of the post-classification snapshot against the
+    // post-agent snapshot (NOT the user-facing before/after `diff`, which would
+    // also include the classifier's conformant imports and could miss an agent
+    // update of a just-imported concept).
+    const agentDiff = diffSnapshots(this.preAgentSnapshot, { entries: afterEntries });
+    const rewriteWarnings = await rewriteArchiveCitationsInConcepts(
+      this.paths.wiki,
+      new Set([...agentDiff.created, ...agentDiff.updated]),
+      this.archiveTargets,
+    );
+    for (const warning of rewriteWarnings) warnings.push(warning);
 
     const leftover = await detectLeftover(this.paths.input, this.nonConformant);
     const leftoverSet = new Set(leftover);
@@ -168,6 +215,50 @@ class IntakeSessionImpl implements IntakeSession {
 }
 
 let intakeSessionCounter = 0;
+
+/**
+ * Rewrite `/archive/<input-relative-path>` placeholder citation links in the
+ * given concept ids to the actual renamed archive paths, writing the changed
+ * files back under `wikiDir`. `conceptIds` MUST be the set of concepts the
+ * AGENT wrote this run (not the full before/after diff — that would include
+ * conformant imports the classifier copied verbatim and never cite this run's
+ * archive). The caller derives it by diffing a post-classification snapshot
+ * against the post-agent snapshot. Returns non-fatal warning strings (one per
+ * failed IO); a missed rewrite leaves a placeholder link, which is still
+ * valid markdown.
+ */
+export async function rewriteArchiveCitationsInConcepts(
+  wikiDir: string,
+  conceptIds: ReadonlySet<string>,
+  archiveTargets: ReadonlyMap<string, string>,
+): Promise<string[]> {
+  if (archiveTargets.size === 0 || conceptIds.size === 0) return [];
+  // Compile the alternation regex ONCE for the whole run, not per concept.
+  const rewriter = compileArchiveRewriter(archiveTargets);
+  if (!rewriter.hasMappings) return [];
+  const warnings: string[] = [];
+  for (const conceptId of conceptIds) {
+    const absolutePath = `${wikiDir}/${conceptId}.md`;
+    const read = await readTextFile(absolutePath);
+    if (!read.success) {
+      // The diff lists a concept the agent reported but no longer wrote, or a
+      // read race — non-fatal, the placeholder link simply stays.
+      warnings.push(
+        `Could not read ${absolutePath} for archive-link rewrite: ${read.error.message}`,
+      );
+      continue;
+    }
+    const { content, changed } = rewriter.rewrite(read.data);
+    if (!changed) continue;
+    const write = await writeTextFile(absolutePath, content);
+    if (!write.success) {
+      warnings.push(
+        `Could not write ${absolutePath} after archive-link rewrite: ${write.error.message}`,
+      );
+    }
+  }
+  return warnings;
+}
 
 /**
  * The single-slot registry holding the pending /wiki-update intake session.
@@ -241,12 +332,42 @@ export async function runUpdate(
   if (!classified.success) return classified;
   const { conformantImported, forAgent, ignored } = classified.data;
 
+  // Snapshot the wiki AFTER the deterministic classifier run (conformant imports
+  // are already on disk) but BEFORE the agent turn. The finalize citation-link
+  // rewriter diffs this against the post-agent snapshot to isolate exactly the
+  // concepts the agent wrote — excluding conformant imports and catching the
+  // case where the agent updates a just-imported concept.
+  const preAgentSnapshot = await snapshotWiki(paths.wiki);
+  if (!preAgentSnapshot.success) return preAgentSnapshot;
+
   // 1. Build the intake-session state. The classifier already deterministically
   //    imported the conformant `.md` files (write to wiki/ + archive original),
   //    so there is nothing more to do for them here. `forAgent` already
   //    includes any deferred `.md` (ones that lacked frontmatter/type).
   const allNonConformant = forAgent;
   const allIgnored = ignored;
+
+  // Resolve every non-conformant original's collision-free archive destination
+  // ONCE, here, before the agent runs (after a move the same call would return
+  // a different, timestamped name). The absolute target feeds the prompt and
+  // the archive-relative form feeds the finalize citation-link rewriter, so
+  // the agent's `/archive/<input-relative-path>` placeholders are rewritten to
+  // the renamed path the UI can actually open. The prompt's `inputFiles` is
+  // built in the SAME loop so there is exactly one resolve per file and no
+  // fallback that could silently feed the agent a non-archive path.
+  const archiveTargets = new Map<string, string>();
+  const promptInputFiles: UpdatePromptInput["inputFiles"][number][] = [];
+  for (const file of allNonConformant) {
+    const target = await resolveArchiveTarget(paths.archive, file.relativePath);
+    archiveTargets.set(file.relativePath, relativePosix(paths.archive, target));
+    promptInputFiles.push({
+      relativePath: file.relativePath,
+      absolutePath: file.absolutePath,
+      archiveTarget: target,
+      extractedTextPath: file.extractedTextPath,
+      sourceFormat: file.sourceFormat,
+    });
+  }
 
   const sessionState: IntakeSessionState = {
     paths,
@@ -257,6 +378,8 @@ export async function runUpdate(
     ignored: allIgnored,
     warnings: runWarnings,
     today,
+    preAgentSnapshot: preAgentSnapshot.data,
+    archiveTargets,
   };
 
   if (allNonConformant.length > 0) {
@@ -267,15 +390,7 @@ export async function runUpdate(
       : { directories: [], types: [], conceptIds: [] };
 
     const prompt = buildUpdatePrompt({
-      inputFiles: await Promise.all(
-        allNonConformant.map(async (file) => ({
-          relativePath: file.relativePath,
-          absolutePath: file.absolutePath,
-          archiveTarget: await resolveArchiveTarget(paths.archive, file.relativePath),
-          extractedTextPath: file.extractedTextPath,
-          sourceFormat: file.sourceFormat,
-        })),
-      ),
+      inputFiles: promptInputFiles,
       archiveDir: paths.archive,
       wikiDir: paths.wiki,
       structure,
@@ -290,6 +405,10 @@ export async function runUpdate(
       "okf-update",
       "Agent transforms non-conformant input — summary appears on completion",
     );
+    // This synchronous return is a PLACEHOLDER: the agent turn is in flight
+    // (hadAgentTurn is recorded on the session, not here) and the real report
+    // is produced by `agent_end` -> `IntakeSession.finalize` later. Callers that
+    // need the final state must read it from the hook, not from this return.
     return ok(emptyReport(beforeCount));
   }
 

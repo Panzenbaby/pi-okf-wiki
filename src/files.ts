@@ -96,10 +96,18 @@ export async function copyFile(
  * `archiveDir` (relativePath uses posix "/" separators).
  *
  * Naming scheme (history-preserving, common case unchanged):
- *   1. `archive/<rel>`                      if free
- *   2. `archive/<stem>.<YYYY-MM-DD-HHMM><ext>` if the plain name is taken
- *   3. `archive/<stem>.<YYYY-MM-DD-HHMM>.<N><ext>` with N=1,2,… if the
+ *   1. `archive/<rel><origSuffix>`                      if free
+ *   2. `archive/<stem>.<YYYY-MM-DD-HHMM><ext><origSuffix>` if the plain name is taken
+ *   3. `archive/<stem>.<YYYY-MM-DD-HHMM>.<N><ext><origSuffix>` with N=1,2,… if the
  *      timestamped name is also taken (e.g. two runs in the same minute)
+ *
+ * `<origSuffix>` is `.orig` iff the original `relativePath` is a `.md` file,
+ * empty otherwise. The `.orig` is the OUTERMOST suffix (always last, after any
+ * collision stamp) so the archived file never ends in `.md` — it is therefore
+ * not a concept document per OKF §3.1 and the bundle stays §9.1-conformant
+ * (archived `.md` originals typically carry no OKF frontmatter). Binary
+ * originals (pdf, docx, …) keep their real extension unchanged so handlers
+ * can open them by extension.
  *
  * Existing archive files are NEVER overwritten — every version is kept. The
  * check-then-rename window is tiny and this runs single-user/local, so the
@@ -118,20 +126,22 @@ export async function resolveArchiveTarget(
   const dot = fileName.lastIndexOf(".");
   const stem = dot > 0 ? fileName.slice(0, dot) : fileName;
   const ext = dot > 0 ? fileName.slice(dot) : "";
+  // `.orig` only for `.md` originals, outermost so the result never ends in `.md`.
+  const origSuffix = fileName.endsWith(".md") ? ".orig" : "";
   const stamp = archiveTimestamp();
 
   const baseDir = join(archiveDir, ...dirParts);
   const candidate = (name: string): string => join(baseDir, name);
 
-  const plain = candidate(fileName);
+  const plain = candidate(`${fileName}${origSuffix}`);
   if (!(await pathExists(plain))) return plain;
 
-  const stamped = candidate(`${stem}.${stamp}${ext}`);
+  const stamped = candidate(`${stem}.${stamp}${ext}${origSuffix}`);
   if (!(await pathExists(stamped))) return stamped;
 
   let n = 1;
   while (true) {
-    const counted = candidate(`${stem}.${stamp}.${n}${ext}`);
+    const counted = candidate(`${stem}.${stamp}.${n}${ext}${origSuffix}`);
     if (!(await pathExists(counted))) return counted;
   n++;
   }

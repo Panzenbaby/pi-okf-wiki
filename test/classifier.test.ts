@@ -18,9 +18,11 @@ beforeEach(async () => {
   workdir = join(tmpdir(), `okf-cls-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   inputRoot = join(workdir, "input");
   wikiRoot = join(workdir, "wiki");
-  archiveRoot = join(workdir, "archive");
+  archiveRoot = join(workdir, "wiki", "archive");
   // The classifier writes conformant content to wiki/ and moves originals to
-  // archive/, so those dirs must exist for the import to succeed.
+  // wiki/archive/ (archive lives INSIDE the OKF bundle so `/archive/<rel>`
+  // citation links resolve bundle-relative), so those dirs must exist for the
+  // import to succeed.
   await mkdir(inputRoot, { recursive: true });
   await mkdir(wikiRoot, { recursive: true });
   await mkdir(archiveRoot, { recursive: true });
@@ -82,7 +84,9 @@ describe("InputClassifier", () => {
     const wikiContent = await readFile(join(wikiRoot, "notes/conformant.md"), "utf8");
     expect(wikiContent).toContain("type: note");
     await expect(readFile(join(inputRoot, "notes/conformant.md"), "utf8")).rejects.toThrow();
-    const archivedContent = await readFile(join(archiveRoot, "notes/conformant.md"), "utf8");
+    // Archived `.md` originals land with an outermost `.orig` suffix so they
+    // are not concept documents per OKF §3.1 and the bundle stays conformant.
+    const archivedContent = await readFile(join(archiveRoot, "notes/conformant.md.orig"), "utf8");
     expect(archivedContent).toContain("type: note");
 
     // forAgent order: non-md (txt, html) first, then deferred .md.
@@ -150,7 +154,7 @@ describe("InputClassifier", () => {
     const wikiContent = await readFile(join(wikiRoot, "concepts/alpha.md"), "utf8");
     expect(wikiContent).toBe("---\ntype: concept\ntitle: Alpha\n---\nalpha body\n");
     await expect(readFile(join(inputRoot, "concepts/alpha.md"), "utf8")).rejects.toThrow();
-    const archivedContent = await readFile(join(archiveRoot, "concepts/alpha.md"), "utf8");
+    const archivedContent = await readFile(join(archiveRoot, "concepts/alpha.md.orig"), "utf8");
     expect(archivedContent).toBe("---\ntype: concept\ntitle: Alpha\n---\nalpha body\n");
   });
 

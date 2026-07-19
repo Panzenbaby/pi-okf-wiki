@@ -95,8 +95,11 @@ available. Reload after upgrading with `/reload`.
    `empty`, `io_failed`) and left in `input/`.
 
 After the agent turn, the extension regenerates `index.md`, appends a dated
-entry to `log.md`, detects any files still left in `input/` (the agent did not
-finish them), and renders a summary widget:
+entry to `log.md`, **rewrites `/archive/<input-relative-path>` placeholder
+citation links** in the agent-written concepts to the actual (collision-renamed)
+archive paths (so a UI can jump straight to the archived original even when it
+was renamed during the move), detects any files still left in `input/` (the
+agent did not finish them), and renders a summary widget:
 
 ```
 OKF /wiki-update summary
@@ -164,7 +167,13 @@ Instead it records the disagreement inside the single concept body:
 
 - A `# Conflicts` (or `# Versions`) table — one row per source with the
   differing attribute, its value, citation, and timestamp.
-- Each source cited under a `# Citations` heading (numbered `[1]` `[2]`).
+- Each source cited under a `# Citations` heading (numbered `[1]` `[2]`). A
+  citation to an archived original is a markdown link of the form
+  `[label](/archive/<input-relative-path>)` using the ORIGINAL input relative
+  path; the extension rewrites that placeholder to the actual (collision-renamed)
+  archive path after the originals are moved, so the link stays resolvable when
+  a file was renamed on archiving. Only the concept **body** is rewritten — the
+  `resource:` frontmatter field stays a canonical URI (never an archive path).
 - A **canonical** value chosen by temporal precedence: the value with the
   latest `timestamp` / “latest” marker wins and is stated in the `description`
   and `# Schema`; older values are marked superseded. If no source is clearly
@@ -256,7 +265,8 @@ leaks outside its repository.
 | `src/wiki/index-log.ts` | `index.md` / `log.md` generation (`generateIndexMd`, `writeIndexMd`, `appendLogMd`, `buildLogEntry`). |
 | `src/wiki/retrieval.ts` | Structure preview and TF-IDF cosine retrieval. The `Retriever` interface is the seam injected into `/wiki-query`; `TermFrequencyRetriever` is the default implementation (it replaces the former `retrieveConcepts` free function, which is kept as a thin wrapper). IDF is computed on the fly from the loaded concepts so common terms are downweighted in any language — no hardcoded stopword list. Also exports: `tokenize`, `renderConceptForPrompt`, `renderWikiTree`, `displayTitle`, `buildStructurePreview`. |
 | `src/prompts.ts` | Agent prompt builders for ingestion and query. |
-| `src/update.ts` | `/wiki-update` command logic and the `IntakeSession` (finalize) that owns the agent-handoff state. |
+| `src/links.ts` | Pure `compileArchiveRewriter` / `rewriteArchiveCitationLinks` — rewrites `/archive/<input-relative-path>` placeholder citation links in a concept BODY (frontmatter untouched) to the actual (post-rename) archive path. |
+| `src/update.ts` | `/wiki-update` command logic and the `IntakeSession` (finalize) that owns the agent-handoff state, including the post-agent citation-link rewrite (`rewriteArchiveCitationsInConcepts`). |
 | `src/classifier.ts` | `InputClassifier` that owns the full input→bucket pipeline AND the deterministic conformant intake: tentative dispatch by extension, the extraction pass (staging extracted text), and pass 3 — read + verify frontmatter + write to `wiki/` + archive original — for conformant `.md` files. Emits the three final buckets (`conformantImported` / `forAgent` / `ignored`) once, in input order. |
 | `src/query.ts` | `/wiki-query` command logic and the `QuerySession` that owns the pending question. Both `buildWikiQueryContext` and `runQuery` take an optional `Retriever` (default `TermFrequencyRetriever`) so the scoring strategy is injectable. |
 | `src/extract/types.ts` | `ExtractedText` AppModel, `DocumentExtractorRepository` interface, extraction-failure cause codes. |

@@ -14,7 +14,13 @@ export function wikiPaths(cwd: string): WikiPaths {
   return {
     root: cwd,
     input: join(cwd, "input"),
-    archive: join(cwd, "archive"),
+    // Archive lives INSIDE the OKF bundle (wiki/), not as a sibling, so that
+    // `/archive/<rel>` citation links in concept bodies are bundle-relative
+    // and resolvable by any OKF consumer. Archived `.md` originals are stored
+    // with an outermost `.orig` suffix (see resolveArchiveTarget in files.ts)
+    // so they are not concept documents per OKF §3.1 and the bundle stays
+    // conformant (§9.1) without requiring frontmatter on archived originals.
+    archive: join(cwd, "wiki", "archive"),
     wiki: join(cwd, "wiki"),
   };
 }

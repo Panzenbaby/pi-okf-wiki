@@ -1,0 +1,126 @@
+// Archive-citation link rewriting.
+//
+// The agent cites archived originals in a concept body as markdown links of
+// the form `[label](/archive/<input-relative-path>)`, using the ORIGINAL input
+// relative path as a stable placeholder. After the agent moves each original
+// into `archive/` — possibly under a collision-renamed path (see
+// `resolveArchiveTarget` in files.ts) — the finalize step rewrites those
+// placeholder links to the real archive path so a UI can open them directly.
+//
+// Scope: ONLY the concept BODY (after the closing `---` frontmatter fence) is
+// rewritten. Frontmatter is left byte-for-byte untouched — `resource:` holds
+// a canonical URI per OKF §4.1 (never an archive path; the prompt forbids
+// that), and rewriting frontmatter would silently paper over an agent misuse.
+// Archive citations live in the `# Citations` body section.
+//
+// This module is pure + total (no IO, no exceptions) so the rename behavior is
+// deterministic and unit-testable independent of the agent and filesystem.
+
+/** A compiled, reusable rewriter for one archive-target mapping. */
+export interface ArchiveRewriter {
+  /** True iff any non-identity mapping is present (i.e. rewriting can do work). */
+  readonly hasMappings: boolean;
+  /**
+   * Rewrite `/archive/<original-relative-path>` placeholders in the BODY of a
+   * concept file to the actual (post-rename) archive path. Frontmatter is
+   * preserved verbatim. Returns the (possibly unchanged) content and whether
+   * a rewrite happened.
+   */
+  rewrite(content: string): { content: string; changed: boolean };
+}
+
+/**
+ * Compile a rewriter for `mapping` (original input relative path -> archive
+ * relative path, both posix). The regex alternation is built ONCE here and
+ * reused across many {@link ArchiveRewriter.rewrite} calls — call this once
+ * per finalize run, not once per concept.
+ *
+ * The alternation is ordered longest-first so the longest key wins at each
+ * position, and is anchored with an end boundary `(?=[)\\s>]|$)` so a shorter
+ * key cannot prefix-match inside a longer path that is NOT a mapping key
+ * (e.g. mapping `{a.md}` must not rewrite `/archive/a.md.bak` — a different
+ * file). The boundary accepts the three forms the prompt actually produces:
+ * a plain markdown link close `)`, an angle-bracket link close `>` (for paths
+ * with spaces, `[label](</archive/...>)`), and a frontmatter / line end
+ * (`\\s` or end-of-string). Identity mappings (original == archive) are
+ * skipped.
+ */
+export function compileArchiveRewriter(
+  mapping: ReadonlyMap<string, string>,
+): ArchiveRewriter {
+  // Drop identity / empty mappings; sort longest-first so the regex
+  // alternation prefers the longest match at each position.
+  const entries = [...mapping.entries()]
+    .filter(([orig, archive]) => orig !== "" && orig !== archive)
+    .sort((a, b) => b[0].length - a[0].length);
+  if (entries.length === 0) {
+    return { hasMappings: false, rewrite: (c) => ({ content: c, changed: false }) };
+  }
+  const lookup = new Map(entries);
+  const alternation = entries.map(([orig]) => escapeRegex(orig)).join("|");
+  const re = new RegExp(`/archive/(?:${alternation})(?=[)\\s>]|$)`, "g");
+
+  const rewriteBody = (body: string): { content: string; changed: boolean } => {
+    if (!body.includes("/archive/")) return { content: body, changed: false };
+    let changed = false;
+    const out = body.replace(re, (match) => {
+      const origRel = match.slice("/archive/".length);
+      const archiveRel = lookup.get(origRel);
+      if (archiveRel === undefined) return match;
+      changed = true;
+      return `/archive/${archiveRel}`;
+    });
+    return { content: out, changed };
+  };
+
+  return {
+    hasMappings: true,
+    rewrite(content: string) {
+      const { frontmatter, body } = splitFrontmatter(content);
+      const result = rewriteBody(body);
+      if (!result.changed) return { content, changed: false };
+      return { content: frontmatter + result.content, changed: true };
+    },
+  };
+}
+
+/**
+ * Convenience wrapper: compile a rewriter for `mapping` and apply it once to
+ * `content`. Use {@link compileArchiveRewriter} directly when rewriting many
+ * files with the same mapping (one compile, many rewrites).
+ */
+export function rewriteArchiveCitationLinks(
+  content: string,
+  mapping: ReadonlyMap<string, string>,
+): { content: string; changed: boolean } {
+  return compileArchiveRewriter(mapping).rewrite(content);
+}
+
+/**
+ * Split a concept file's content into its frontmatter (verbatim, including
+ * both `---` fences and the trailing newline) and body. If the content has no
+ * valid closed frontmatter block, `frontmatter` is "" and `body` is the whole
+ * content (so a frontmatter-less file is still rewritten as a single body).
+ *
+ * The split is structural (line-based on the closing `---` fence), not a YAML
+ * parse, so every frontmatter byte — key order, comments, quoting — is
+ * preserved exactly when the body is rewritten and the file is reassembled.
+ */
+function splitFrontmatter(content: string): { frontmatter: string; body: string } {
+  if (!content.startsWith("---")) return { frontmatter: "", body: content };
+  const lines = content.split(/\r?\n/);
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i].trim() === "---") {
+      const frontmatter = lines.slice(0, i + 1).join("\n") + "\n";
+      const body = lines.slice(i + 1).join("\n");
+      return { frontmatter, body };
+    }
+  }
+  // Unclosed frontmatter — treat the whole content as the body.
+  return { frontmatter: "", body: content };
+}
+
+/** Escape regex metacharacters in a literal string for use in a RegExp. */
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
