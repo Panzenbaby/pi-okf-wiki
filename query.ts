@@ -8,6 +8,7 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
 import { err, ok, type Result } from "./types.ts";
+import { SessionRegistry, type Session } from "./session.ts";
 import { pathExists, readTextFile } from "./files.ts";
 import {
   loadAllConcepts,
@@ -18,6 +19,32 @@ import {
 import { buildQuerySystemContext } from "./prompts.ts";
 
 const RETRIEVAL_LIMIT = 10;
+
+/**
+ * Owns the pending /wiki-query question between the command handler and the
+ * `before_agent_start` event hook. Constructed in `runQuery`, registered in
+ * {@link querySessionRegistry}, and consumed by the hook to build the
+ * system-prompt context from {@link QuerySession.question}.
+ */
+export interface QuerySession extends Session {
+  readonly question: string;
+}
+
+class QuerySessionImpl implements QuerySession {
+  readonly id: string;
+  constructor(readonly question: string) {
+    this.id = `query-${++querySessionCounter}`;
+  }
+}
+
+let querySessionCounter = 0;
+
+/**
+ * The single-slot registry holding the pending /wiki-query session. `runQuery`
+ * writes here before sendUserMessage; the `before_agent_start` hook in index.ts
+ * calls `take()` and injects the wiki context for {@link QuerySession.question}.
+ */
+export const querySessionRegistry = new SessionRegistry<QuerySession>();
 
 /**
  * Build the wiki-query system-prompt context (retrieval + instructions) for a
@@ -61,6 +88,18 @@ export async function runQuery(
   ctx: ExtensionCommandContext,
   question: string,
 ): Promise<Result<void>> {
+  // Drain any pre-existing pending query session so a second /wiki-query does
+  // not silently drop the first (e.g. prior turn aborted / never fired
+  // before_agent_start). A pending query session has no side effects to
+  // finalize, so just warn and proceed.
+  const displacedQuery = querySessionRegistry.take();
+  if (displacedQuery !== undefined) {
+    ctx.ui.notify(
+      "A previous /wiki-query was still pending — replacing it with this one.",
+      "warning",
+    );
+  }
+
   const trimmed = question.trim();
   if (trimmed === "") {
     ctx.ui.notify("Usage: /wiki-query <question>", "warning");
@@ -88,22 +127,9 @@ export async function runQuery(
   // question as the clean user message — the retrieved context is injected
   // into the system prompt by the before_agent_start handler in index.ts.
   pi.setSessionName(trimmed);
-  _pendingQuery = trimmed;
+  querySessionRegistry.set(new QuerySessionImpl(trimmed));
   pi.sendUserMessage(trimmed);
   return ok(undefined);
-}
-
-/**
- * Internal flag: set by /wiki-query before sendUserMessage, consumed by the
- * before_agent_start handler to inject wiki context into the system prompt.
- */
-let _pendingQuery: string | undefined;
-
-/** Consume and return the pending wiki-query question, or undefined. */
-export function consumePendingQuery(): string | undefined {
-  const q = _pendingQuery;
-  _pendingQuery = undefined;
-  return q;
 }
 
 async function readIndex(wikiRoot: string): Promise<string | null> {

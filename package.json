@@ -23,6 +23,7 @@
     "prompts.ts",
     "update.ts",
     "query.ts",
+    "session.ts",
     "extract/",
     "README.md",
     "LICENSE"

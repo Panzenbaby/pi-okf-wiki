@@ -245,14 +245,15 @@ leaks outside its repository.
 
 | File | Responsibility |
 | --- | --- |
-| `index.ts` | Registers the `/wiki-update` and `/wiki-query` commands and the `agent_end` finalize hook. |
+| `index.ts` | Registers the `/wiki-update` and `/wiki-query` commands; owns the `agent_end` finalize hook and the `before_agent_start` query-context hook (both via the session registries). |
 | `types.ts` | `Result<T>`, `AppError`, OKF domain models, and the `IgnoreReason` code union. |
+| `session.ts` | `Session` interface and the generic `SessionRegistry<T>` that owns the single-slot handoff between a command handler and an event hook. |
 | `frontmatter.ts` | Minimal YAML frontmatter parser for the OKF subset. |
 | `files.ts` | Filesystem helpers, all returning `Result<T>` (incl. `copyFile`, `removeDir`). |
 | `wiki.ts` | Concept loading, snapshot/diff, `index.md`/`log.md` generation, structure preview, term-frequency retrieval. |
 | `prompts.ts` | Agent prompt builders for ingestion and query. |
-| `update.ts` | `/wiki-update` command logic, extraction pass, and finalize. |
-| `query.ts` | `/wiki-query` command logic. |
+| `update.ts` | `/wiki-update` command logic, extraction pass, and the `IntakeSession` (finalize) that owns the agent-handoff state. |
+| `query.ts` | `/wiki-query` command logic and the `QuerySession` that owns the pending question. |
 | `extract/types.ts` | `ExtractedText` AppModel, `DocumentExtractorRepository` interface, extraction-failure cause codes. |
 | `extract/pdf.ts` | `PdfRepository` (`unpdf`). |
 | `extract/docx.ts` | `DocxRepository` (`mammoth`). |

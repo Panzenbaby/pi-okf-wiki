@@ -21,6 +21,7 @@ import {
   type WikiSnapshot,
 } from "./types.ts";
 import { ok, err } from "./types.ts";
+import { SessionRegistry, type Session } from "./session.ts";
 import { parseDocument } from "./frontmatter.ts";
 import {
   ensureDir,
@@ -58,7 +59,11 @@ import {
 
 const RESERVED_INPUT = new Set(["index.md", "log.md"]);
 
-interface FinalizeState {
+/**
+ * Immutable snapshot of the deterministic-phase state an IntakeSession owns.
+ * The `hadAgentTurn` flag is set later by {@link IntakeSession.handoffToAgent}.
+ */
+interface IntakeSessionState {
   readonly paths: WikiPaths;
   readonly beforeSnapshot: WikiSnapshot;
   readonly beforeCount: number;
@@ -67,11 +72,118 @@ interface FinalizeState {
   readonly ignored: ReadonlyArray<{ path: string; reason: IgnoreReason; detail?: string }>;
   readonly warnings: readonly string[];
   readonly today: string;
-  readonly hadAgentTurn: boolean;
 }
 
-// Set when /wiki-update hands off to the agent; consumed by the agent_end handler.
-let pendingFinalize: FinalizeState | null = null;
+/**
+ * Owns the /wiki-update handoff state between the command handler and the
+ * `agent_end` event hook. Constructed from the deterministic-phase state,
+ * registered in {@link intakeSessionRegistry}, and finalized by the hook.
+ * For the no-agent-turn path a session is still built and finalized
+ * synchronously, just not registered.
+ */
+export interface IntakeSession extends Session {
+  /** Records that an agent turn is in flight (called before sendUserMessage). */
+  handoffToAgent(): void;
+  /** Run the post-agent finalize (snapshot diff, index/log, summary). */
+  finalize(ctx: ExtensionContext): Promise<UpdateReport>;
+}
+
+class IntakeSessionImpl implements IntakeSession {
+  readonly id: string;
+  private hadAgentTurn = false;
+  private readonly paths: WikiPaths;
+  private readonly beforeSnapshot: WikiSnapshot;
+  private readonly beforeCount: number;
+  private readonly conformantImported: readonly string[];
+  private readonly nonConformant: readonly InputFile[];
+  private readonly ignored: ReadonlyArray<{ path: string; reason: IgnoreReason; detail?: string }>;
+  private readonly warnings: readonly string[];
+  private readonly today: string;
+
+  constructor(state: IntakeSessionState) {
+    this.id = `intake-${++intakeSessionCounter}`;
+    this.paths = state.paths;
+    this.beforeSnapshot = state.beforeSnapshot;
+    this.beforeCount = state.beforeCount;
+    this.conformantImported = state.conformantImported;
+    this.nonConformant = state.nonConformant;
+    this.ignored = state.ignored;
+    this.warnings = state.warnings;
+    this.today = state.today;
+  }
+
+  handoffToAgent(): void {
+    this.hadAgentTurn = true;
+  }
+
+  async finalize(ctx: ExtensionContext): Promise<UpdateReport> {
+    const warnings: string[] = [...this.warnings];
+
+    const afterSnapshot = await snapshotWiki(this.paths.wiki);
+    const afterEntries = afterSnapshot.success
+      ? afterSnapshot.data.entries
+      : new Map<string, string>();
+    const diff = diffSnapshots(this.beforeSnapshot, { entries: afterEntries });
+
+    const allConcepts = await loadAllConcepts(this.paths.wiki);
+    if (allConcepts.success) {
+      await writeIndexMd(this.paths.wiki, allConcepts.data);
+    }
+    await appendLogMd(this.paths.wiki, this.today, diff);
+
+    const leftover = await detectLeftover(this.paths.input, this.nonConformant);
+    const leftoverSet = new Set(leftover);
+
+    // Archive the extracted text for every file the agent successfully archived
+    // (i.e. not leftover). Leftover originals keep their temp text only until the
+    // cleanup below removes it — it is regenerated on the next run.
+    for (const file of this.nonConformant) {
+      if (file.tempRelativeName === undefined) continue;
+      if (leftoverSet.has(file.relativePath)) continue;
+      const archived = await archiveExtractedText(
+        this.paths.input,
+        this.paths.archive,
+        file.tempRelativeName,
+        resolveArchiveTarget,
+      );
+      if (!archived.success) {
+        warnings.push(
+          `Could not archive extracted text for ${file.relativePath}: ${archived.error.message}`,
+        );
+      }
+    }
+    const cleaned = await cleanupExtractionTemp(this.paths.input);
+    if (!cleaned.success) {
+      warnings.push(`Could not clean extraction temp: ${cleaned.error.message}`);
+    }
+
+    const report: UpdateReport = {
+      conformantImported: this.conformantImported,
+      nonConformantHandedToAgent: this.nonConformant.map((file) => file.relativePath),
+      ignored: this.ignored,
+      leftover,
+      createdConcepts: diff.created,
+      updatedConcepts: diff.updated,
+      wikiConceptCountBefore: this.beforeCount,
+      wikiConceptCountAfter: afterEntries.size,
+      hadAgentTurn: this.hadAgentTurn,
+      warnings,
+    };
+
+    ctx.ui.setStatus("okf-update", "");
+    showSummary(ctx, report);
+    return report;
+  }
+}
+
+let intakeSessionCounter = 0;
+
+/**
+ * The single-slot registry holding the pending /wiki-update intake session.
+ * `runUpdate` writes here when it hands off to the agent; the `agent_end` hook
+ * in index.ts calls `take()` and finalizes the session (if any).
+ */
+export const intakeSessionRegistry = new SessionRegistry<IntakeSession>();
 
 export async function runUpdate(
   pi: ExtensionAPI,
@@ -80,8 +192,26 @@ export async function runUpdate(
   const paths = wikiPaths(ctx.cwd);
   const today = new Date().toISOString().slice(0, 10);
 
-  // Clear any summary from a previous run while this one is in progress.
+  // Clear any summary from a previously-completed run before this one starts (and
+  // before the displaced-session drain below, so a finalized orphan's summary
+  // survives and is not immediately wiped).
   ctx.ui.setWidget("okf-update", undefined);
+
+  // Drain any pre-existing pending intake session before starting this run.
+  // This covers two orphan scenarios: a second /wiki-update issued while a
+  // prior agent turn was still in flight, and a prior turn that never fired
+  // agent_end (agent crash / user abort). Finalizing the displaced session
+  // compares *its* (old) beforeSnapshot to the *current* wiki state, which
+  // captures whatever the prior agent actually wrote. This run then takes its
+  // own fresh beforeSnapshot of the now-current state below — correct ordering.
+  const displacedIntake = intakeSessionRegistry.take();
+  if (displacedIntake !== undefined) {
+    ctx.ui.notify(
+      "A previous /wiki-update was still pending — finalizing it before starting this run.",
+      "warning",
+    );
+    await displacedIntake.finalize(ctx);
+  }
 
   const dirsOk = await ensureAllDirs(paths);
   if (!dirsOk.success) return dirsOk;
@@ -154,6 +284,17 @@ export async function runUpdate(
   }));
 
   // 2. Non-conformant files: delegate to the agent, finalize on agent_end.
+  const sessionState: IntakeSessionState = {
+    paths,
+    beforeSnapshot: beforeSnapshot.data,
+    beforeCount,
+    conformantImported,
+    nonConformant: allNonConformant,
+    ignored: ignoredEntries,
+    warnings: runWarnings,
+    today,
+  };
+
   if (allNonConformant.length > 0) {
     const conceptsBefore = await loadAllConcepts(paths.wiki);
     const structure = conceptsBefore.success
@@ -175,18 +316,10 @@ export async function runUpdate(
       structure,
     });
 
-    pendingFinalize = {
-      paths,
-      beforeSnapshot: beforeSnapshot.data,
-      beforeCount,
-      conformantImported,
-      nonConformant: allNonConformant,
-      ignored: ignoredEntries,
-      warnings: runWarnings,
-      today,
-      hadAgentTurn: true,
-    };
-
+    const session = new IntakeSessionImpl(sessionState);
+    session.handoffToAgent();
+    // Slot is guaranteed empty: we drained any pending session at entry.
+    intakeSessionRegistry.set(session);
     pi.sendUserMessage(prompt);
     ctx.ui.setStatus(
       "okf-update",
@@ -196,80 +329,9 @@ export async function runUpdate(
   }
 
   // 3. No agent turn: finalize synchronously now.
-  const report = await finalizeUpdate(ctx, {
-    paths,
-    beforeSnapshot: beforeSnapshot.data,
-    beforeCount,
-    conformantImported,
-    nonConformant: allNonConformant,
-    ignored: ignoredEntries,
-    warnings: runWarnings,
-    today,
-    hadAgentTurn: false,
-  });
+  const session = new IntakeSessionImpl(sessionState);
+  const report = await session.finalize(ctx);
   return ok(report);
-}
-
-/** Called from the agent_end handler; finalizes a pending /wiki-update run. */
-export async function finalizePendingUpdate(ctx: ExtensionContext): Promise<void> {
-  const state = pendingFinalize;
-  if (state === null) return;
-  pendingFinalize = null;
-  await finalizeUpdate(ctx, state);
-}
-
-async function finalizeUpdate(
-  ctx: ExtensionContext,
-  state: FinalizeState,
-): Promise<UpdateReport> {
-  const { paths, beforeSnapshot, beforeCount, conformantImported, nonConformant, ignored, warnings: stateWarnings, today } = state;
-  const warnings: string[] = [...stateWarnings];
-
-  const afterSnapshot = await snapshotWiki(paths.wiki);
-  const afterEntries = afterSnapshot.success ? afterSnapshot.data.entries : new Map<string, string>();
-  const diff = diffSnapshots(beforeSnapshot, { entries: afterEntries });
-
-  const allConcepts = await loadAllConcepts(paths.wiki);
-  if (allConcepts.success) {
-    await writeIndexMd(paths.wiki, allConcepts.data);
-  }
-  await appendLogMd(paths.wiki, today, diff);
-
-  const leftover = await detectLeftover(paths.input, nonConformant);
-  const leftoverSet = new Set(leftover);
-
-  // Archive the extracted text for every file the agent successfully archived
-  // (i.e. not leftover). Leftover originals keep their temp text only until the
-  // cleanup below removes it — it is regenerated on the next run.
-  for (const file of nonConformant) {
-    if (file.tempRelativeName === undefined) continue;
-    if (leftoverSet.has(file.relativePath)) continue;
-    const archived = await archiveExtractedText(paths.input, paths.archive, file.tempRelativeName, resolveArchiveTarget);
-    if (!archived.success) {
-      warnings.push(`Could not archive extracted text for ${file.relativePath}: ${archived.error.message}`);
-    }
-  }
-  const cleaned = await cleanupExtractionTemp(paths.input);
-  if (!cleaned.success) {
-    warnings.push(`Could not clean extraction temp: ${cleaned.error.message}`);
-  }
-
-  const report: UpdateReport = {
-    conformantImported,
-    nonConformantHandedToAgent: nonConformant.map((file) => file.relativePath),
-    ignored,
-    leftover,
-    createdConcepts: diff.created,
-    updatedConcepts: diff.updated,
-    wikiConceptCountBefore: beforeCount,
-    wikiConceptCountAfter: afterEntries.size,
-    hadAgentTurn: state.hadAgentTurn,
-    warnings,
-  };
-
-  ctx.ui.setStatus("okf-update", "");
-  showSummary(ctx, report);
-  return report;
 }
 
 async function ensureAllDirs(paths: WikiPaths): Promise<Result<void>> {
