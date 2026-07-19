@@ -120,11 +120,27 @@ existing structure.
 - If unsure whether a concept already exists (large wiki, similar topic),
   verify with "ls"/"find" on ${input.wikiDir} and "grep" for the candidate
   title/keywords before writing — do not duplicate an existing concept under
-  a new ID. Prefer existing directories/types when the content matches; create
-  a new subdirectory only when nothing existing fits.
+  a new ID.
+- NEW concepts MUST be placed inside a subdirectory — NEVER write a new
+  concept directly at the wiki root as \`<slug>.md\`. The concept ID MUST
+  contain at least one path separator (\`<directory>/<slug>\`). Choose the
+  directory by, in order of preference:
+    1. an existing directory whose topic the concept matches (see the
+       "Directories" list above);
+    2. a new directory derived from the concept's \`type\` (use the \`type\`
+       value, lowercased and slugified, as the top-level namespace, e.g.
+       type \`Database\` -> \`database/<slug>.md\`);
+    3. a new topical directory derived from the subject when no \`type\` fits
+       (a short, stable slug such as \`tables/orders.md\`).
+  Only an ID that ALREADY exists at the root (an update to an existing
+  root-level concept) may stay at the root; never CREATE a new root-level
+  concept file. Reusing an existing nested ID keeps its directory.
 
 STEP 2 — Reconcile the cluster and write ONE OKF concept file to
 ${input.wikiDir}/<concept-id>.md:
+- The <concept-id> MUST contain a path separator (see STEP 1). Create the
+  parent directory first with \`mkdir -p ${input.wikiDir}/<directory>\` before
+  writing the file.
 - Frontmatter: type, title, description, tags, timestamp (ISO 8601). For a
   cluster, set the concept \`timestamp\` to the latest source timestamp (or now,
   if sources carry none).
