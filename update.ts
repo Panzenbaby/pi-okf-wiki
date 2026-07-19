@@ -22,6 +22,7 @@ import {
 } from "./types.ts";
 import { ok } from "./types.ts";
 import { SessionRegistry, type Session } from "./session.ts";
+import { EXTRACTION_TEMP_DIR } from "./extract/service.ts";
 import {
   ensureDir,
   listFiles,
@@ -310,7 +311,7 @@ async function collectInputFiles(
   inputRoot: string,
 ): Promise<Result<readonly InputFile[]>> {
   if (!(await pathExists(inputRoot))) return ok([]);
-  const files = await listFiles(inputRoot);
+  const files = await listFiles(inputRoot, (name) => name === EXTRACTION_TEMP_DIR);
   if (!files.success) return files;
   return ok(
     files.data.map((file) => ({
@@ -344,7 +345,7 @@ async function detectLeftover(
   nonConformant: readonly InputFile[],
 ): Promise<readonly string[]> {
   const expected = new Set(nonConformant.map((file) => file.relativePath));
-  const files = await listFiles(inputRoot);
+  const files = await listFiles(inputRoot, (name) => name === EXTRACTION_TEMP_DIR);
   if (!files.success) return [];
   return files.data
     .filter((file) => expected.has(file.relativePath))

@@ -148,8 +148,19 @@ export interface FileEntry {
   readonly isDirectory: boolean;
 }
 
-/** Recursively list all files under `root`, skipping the `archive` folder. */
-export async function listFiles(root: string): Promise<Result<readonly FileEntry[]>> {
+/**
+ * Recursively list all files under `root`.
+ *
+ * This walker is generic and domain-agnostic: by default it skips nothing.
+ * Callers that need to exclude a directory subtree (e.g. an extraction temp
+ * dir staged inside `input/`) pass a `skip` predicate; when `skip` returns
+ * `true` for a directory entry, that entry and its whole subtree are omitted.
+ * When `skip` is omitted, every file under `root` is returned.
+ */
+export async function listFiles(
+  root: string,
+  skip?: (entryName: string, isDirectory: boolean) => boolean,
+): Promise<Result<readonly FileEntry[]>> {
   const collected: FileEntry[] = [];
   const walk = async (dir: string): Promise<Result<void>> => {
     let entries: import("node:fs").Dirent[];
@@ -163,10 +174,9 @@ export async function listFiles(root: string): Promise<Result<readonly FileEntry
     }
     for (const entry of entries) {
       const absolutePath = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        // Skip the extraction temp dir so extracted text is never re-walked as
-        // new input on the next /wiki-update.
-        if (entry.name === ".okf-extract") continue;
+      const isDirectory = entry.isDirectory();
+      if (skip !== undefined && skip(entry.name, isDirectory)) continue;
+      if (isDirectory) {
         const sub = await walk(absolutePath);
         if (!sub.success) return sub;
         continue;
