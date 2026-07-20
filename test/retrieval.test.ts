@@ -20,6 +20,8 @@ const frontmatter = (overrides: Partial<Frontmatter> = {}): Frontmatter => ({
   resource: undefined,
   tags: [],
   timestamp: undefined,
+  status: undefined,
+  supersedes: [],
   raw: {},
   ...overrides,
 });

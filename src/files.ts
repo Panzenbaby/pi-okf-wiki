@@ -92,6 +92,20 @@ export async function copyFile(
   }
 }
 
+/** Remove a single file. No error if it does not exist (idempotent). */
+export async function removeFile(path: string): Promise<Result<void>> {
+  try {
+    await unlink(path);
+    return ok(undefined);
+  } catch (error) {
+    if (isNotFound(error)) return ok(undefined);
+    return err<void>(`Failed to remove file ${path}`, {
+      path,
+      cause: errorMessage(error),
+    });
+  }
+}
+
 /**
  * Resolve a collision-free archive destination for `relativePath` under
  * `archiveDir` (relativePath uses posix "/" separators).

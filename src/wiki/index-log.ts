@@ -1,44 +1,198 @@
 // index.md and log.md generation.
+//
+// Per OKF §6, an `index.md` MAY appear in any directory to support
+// progressive disclosure — it enumerates THAT directory's direct contents
+// (concepts + child subdirectories), not a recursive dump of the whole tree.
+// We therefore generate one `index.md` per qualifying directory (root + every
+// directory that contains a concept, directly or transitively), each listing
+// only its own direct concepts and its immediate child subdirectories.
+// `archive/` is never indexed (it holds raw originals, not knowledge — see
+// `src/wiki/paths.ts`).
+//
+// Per OKF §11, the bundle-root `index.md` is the ONLY `index.md` permitted to
+// carry frontmatter, where it MAY declare the targeted OKF version. We always
+// emit `okf_version: "0.1"` there so the bundle is self-describing.
 
 import { join } from "node:path";
-import type { Concept, Result } from "../types.ts";
-import { readTextFile, writeTextFile } from "../files.ts";
+import { ok, type Concept, type Result } from "../types.ts";
+import { listFiles, readTextFile, removeFile, writeTextFile } from "../files.ts";
 import type { WikiDiff } from "./concepts.ts";
 
-/** Generate the root index.md from all concepts, grouped by directory. */
-export function generateIndexMd(concepts: readonly Concept[]): string {
-  const groups = new Map<string, Concept[]>();
+/** OKF spec version this bundle targets (§11). Declared in root `index.md` frontmatter. */
+export const OKF_VERSION = "0.1";
+
+/** The `archive/` directory inside the bundle — never indexed. */
+const ARCHIVE_DIR = "archive";
+
+/**
+ * Compute every directory that should get an `index.md`: the root plus every
+ * directory on the path to a concept (so a parent of nested-only concepts is
+ * still indexed for progressive disclosure). `archive/` is excluded.
+ * The root (`""`) is ALWAYS included so an empty wiki still gets a root index.
+ */
+export function computeIndexDirs(concepts: readonly Concept[]): Set<string> {
+  const dirs = new Set<string>();
+  dirs.add(""); // root always
   for (const concept of concepts) {
-    const dir = concept.conceptId.includes("/")
-      ? concept.conceptId.slice(0, concept.conceptId.lastIndexOf("/"))
-      : ".";
-    const bucket = groups.get(dir) ?? [];
-    bucket.push(concept);
-    groups.set(dir, bucket);
-  }
-  const lines: string[] = ["# Wiki Index", ""];
-  for (const dir of [...groups.keys()].sort()) {
-    lines.push(`## ${dir === "." ? "(root)" : dir}`, "");
-    for (const concept of groups.get(dir)!.sort((a, b) =>
-      a.conceptId.localeCompare(b.conceptId),
-    )) {
-      const title = concept.frontmatter.title ?? concept.conceptId;
-      const description = concept.frontmatter.description ?? "";
-      const link = `${concept.conceptId}.md`;
-      const suffix = description ? ` - ${description}` : "";
-      lines.push(`* [${title}](${link})${suffix}`);
+    let cur = dirOf(concept.conceptId);
+    if (isArchivePath(cur)) continue;
+    while (true) {
+      dirs.add(cur);
+      if (cur === "") break;
+      cur = parentDir(cur);
     }
-    lines.push("");
   }
+  return dirs;
+}
+
+/** Directory of a concept id: `""` for root, `tables` for `tables/orders`. */
+function dirOf(conceptId: string): string {
+  const idx = conceptId.lastIndexOf("/");
+  return idx === -1 ? "" : conceptId.slice(0, idx);
+}
+
+/** Parent directory: `""` for root or a top-level dir; `tables` for `tables/sales`. */
+function parentDir(dir: string): string {
+  if (dir === "") return "";
+  const idx = dir.lastIndexOf("/");
+  return idx === -1 ? "" : dir.slice(0, idx);
+}
+
+/** Last path segment for headings/links: `Wiki` for root, `sales` for `tables/sales`. */
+function basename(dir: string): string {
+  if (dir === "") return "Wiki";
+  const idx = dir.lastIndexOf("/");
+  return idx === -1 ? dir : dir.slice(idx + 1);
+}
+
+function isArchivePath(p: string): boolean {
+  return p === ARCHIVE_DIR || p.startsWith(`${ARCHIVE_DIR}/`);
+}
+
+/** Immediate child directories (one level deeper) of `dir`, sorted. */
+function childSubdirs(dir: string, indexDirs: Set<string>): string[] {
+  const children: string[] = [];
+  for (const candidate of indexDirs) {
+    if (candidate === "") continue; // root is never a child
+    // parentDir(candidate) === dir already implies candidate !== dir.
+    if (parentDir(candidate) === dir) children.push(candidate);
+  }
+  return children.sort();
+}
+
+/** Concepts directly in `dir` (not nested deeper). */
+function directConcepts(
+  dir: string,
+  concepts: readonly Concept[],
+): Concept[] {
+  return concepts.filter((concept) => dirOf(concept.conceptId) === dir);
+}
+
+/**
+ * Render the `index.md` body for a single directory: subdirectories first
+ * (bare `* [name/](name/)` links — no fabricated description), then direct
+ * concepts (alphabetical by concept id) with title + description. The root
+ * directory is just the `""` instance of this same format (§6).
+ */
+export function generateDirIndexMd(
+  dir: string,
+  concepts: readonly Concept[],
+  indexDirs: Set<string>,
+): string {
+  const lines: string[] = [`# ${basename(dir)} Index`, ""];
+
+  const subs = childSubdirs(dir, indexDirs);
+  for (const sub of subs) {
+    lines.push(`* [${basename(sub)}/](${basename(sub)}/)`);
+  }
+  if (subs.length > 0) lines.push("");
+
+  // NOTE: childSubdirs + directConcepts each scan the full set per directory,
+  // so writeAllIndexMd is O(dirs * n). Fine for current local-wiki scale; if
+  // it ever matters, pre-group concepts into a Map<dir, Concept[]> once.
+  const direct = directConcepts(dir, concepts)
+    .slice()
+    .sort((a, b) => a.conceptId.localeCompare(b.conceptId));
+  for (const concept of direct) {
+    // Relative URL from this directory to the concept file.
+    const slug = dir === "" ? concept.conceptId : concept.conceptId.slice(dir.length + 1);
+    // Title falls back to the slug (the filename), matching §4.1 "consumers
+    // MAY derive a title from the filename" — keeps link text and href
+    // symmetric within a per-directory index.
+    const title = concept.frontmatter.title ?? slug;
+    const link = `${slug}.md`;
+    const description = concept.frontmatter.description;
+    lines.push(description ? `* [${title}](${link}) - ${description}` : `* [${title}](${link})`);
+  }
+  lines.push("");
   return lines.join("\n");
 }
 
-export async function writeIndexMd(
+/**
+ * Render the ROOT `index.md`: the per-dir format for `""`, prefixed with the
+ * `okf_version` frontmatter block (§11 — the only `index.md` allowed frontmatter).
+ */
+export function generateRootIndexMd(
+  concepts: readonly Concept[],
+  indexDirs: Set<string>,
+): string {
+  const body = generateDirIndexMd("", concepts, indexDirs);
+  return `---\nokf_version: "${OKF_VERSION}"\n---\n\n${body}`;
+}
+
+/**
+ * Write the root `index.md` (always) plus one `index.md` per qualifying
+ * subdirectory, and prune orphan `index.md` files in directories that no
+ * longer qualify (e.g. after a concept was removed and its directory became
+ * empty of concepts). Pruning is best-effort: an individual unlink failure is
+ * skipped (the orphan stays, which §5.3 tolerates). The root `index.md` is
+ * never pruned (`""` is always in `indexDirs`).
+ */
+export async function writeAllIndexMd(
   wikiRoot: string,
   concepts: readonly Concept[],
 ): Promise<Result<void>> {
-  const content = generateIndexMd(concepts);
-  return writeTextFile(join(wikiRoot, "index.md"), content);
+  const indexDirs = computeIndexDirs(concepts);
+
+  const pruned = await pruneOrphanIndexMd(wikiRoot, indexDirs);
+  if (!pruned.success) return pruned;
+
+  const rootContent = generateRootIndexMd(concepts, indexDirs);
+  const rootWrite = await writeTextFile(join(wikiRoot, "index.md"), rootContent);
+  if (!rootWrite.success) return rootWrite;
+
+  for (const dir of indexDirs) {
+    if (dir === "") continue; // root already written
+    const content = generateDirIndexMd(dir, concepts, indexDirs);
+    const segments = dir.split("/");
+    const write = await writeTextFile(join(wikiRoot, ...segments, "index.md"), content);
+    if (!write.success) return write;
+  }
+  return ok(undefined);
+}
+
+/**
+ * Delete every `index.md` under `wikiRoot` whose directory is not in
+ * `indexDirs` (orphan indexes left from directories that lost their concepts).
+ * Best-effort: unlink failures are skipped, not fatal. The root `index.md`
+ * (directory `""`) is always retained since `""` ∈ `indexDirs`.
+ */
+async function pruneOrphanIndexMd(
+  wikiRoot: string,
+  indexDirs: Set<string>,
+): Promise<Result<void>> {
+  const files = await listFiles(wikiRoot);
+  if (!files.success) return files;
+  for (const file of files.data) {
+    const segments = file.relativePath.split("/");
+    if (segments[segments.length - 1] !== "index.md") continue;
+    const dir = segments.length === 1 ? "" : segments.slice(0, -1).join("/");
+    if (indexDirs.has(dir)) continue; // still qualifies — keep
+    // Orphan: best-effort removal. A failure leaves the file (§5.3 tolerates).
+    const removed = await removeFile(file.absolutePath);
+    if (!removed.success) continue;
+  }
+  return ok(undefined);
 }
 
 export async function appendLogMd(

@@ -31,8 +31,8 @@ const OKF_RULES = `OKF (Open Knowledge Format) rules for a concept file:
 - A concept is a markdown file with YAML frontmatter delimited by --- lines.
 - Frontmatter MUST contain a non-empty \`type\` field. Recommended: \`title\`,
   \`description\`, \`resource\` (canonical URI, optional — NEVER an archive path),
-  \`tags\` (list), \`timestamp\` (ISO 8601). Producers MAY add extra keys (§4.1);
-  consumers preserve them.
+  \`tags\` (flow list like \`[a, b]\`), \`timestamp\` (ISO 8601). Producers MAY add
+  extra keys (§4.1); consumers preserve them.
 - The body is structural markdown: headings (# Schema, # Examples, # Citations
   where applicable), lists, tables, fenced code blocks.
 - Link related concepts with bundle-relative links like
@@ -49,8 +49,9 @@ const OKF_RULES = `OKF (Open Knowledge Format) rules for a concept file:
 - Temporal precedence: when values conflict, prefer the one with the latest
   \`timestamp\` (or a "neueste Version" / "latest" marker) as canonical; mark
   older values as superseded. Use the producer-defined frontmatter fields
-  \`status: current | superseded\` and \`supersedes: /path/to/older.md\` to make
-  the precedence graph explicit. Absent timestamps => keep the conflict
+  \`status: current | superseded\` and \`supersedes: [/path/to/older.md]\` (a
+  bundle-relative path LIST, so one concept can supersede several older ones)
+  to make the precedence graph explicit. Absent timestamps => keep the conflict
   unresolved and label all values as "unverified".`;
 
 export interface UpdatePromptInput {
@@ -141,9 +142,11 @@ ${input.wikiDir}/<concept-id>.md:
 - The <concept-id> MUST contain a path separator (see STEP 1). Create the
   parent directory first with \`mkdir -p ${input.wikiDir}/<directory>\` before
   writing the file.
-- Frontmatter: type, title, description, tags, timestamp (ISO 8601). For a
-  cluster, set the concept \`timestamp\` to the latest source timestamp (or now,
-  if sources carry none).
+- Frontmatter: type, title, description, tags (flow list \`[a, b]\`),
+  timestamp (ISO 8601). Optional: \`status: current | superseded\` and
+  \`supersedes: [/path/to/older.md]\` (bundle-relative path list) to mark the
+  precedence graph. For a cluster, set the concept \`timestamp\` to the latest
+  source timestamp (or now, if sources carry none).
 - Body: structured markdown. Extract schemas, examples, and citations where
   present. Express variants/versions INSIDE the body (a # Versions table or a
   # Conflicts section), linked and explained — not as parallel concept files.
@@ -160,8 +163,9 @@ ${input.wikiDir}/<concept-id>.md:
     * If no source is clearly newer, leave ALL conflicting values in the table
       labelled "unverified" and do not declare a canonical one.
   Use the producer-defined frontmatter fields \`status\`
-  (\`current\` / \`superseded\`) and \`supersedes: /path/to/older.md\` to make the
-  precedence graph explicit when applicable.
+  (\`current\` / \`superseded\`) and \`supersedes: [/path/to/older.md]\` (a
+  bundle-relative path LIST) to make the precedence graph explicit when
+  applicable.
 
 STEP 3 — ONLY AFTER the concept file is written successfully, move EACH original
 from input/<relativePath> to the EXACT archive path listed for that file

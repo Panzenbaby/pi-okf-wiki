@@ -195,6 +195,8 @@ export function renderConceptForPrompt(concept: Concept): string {
     fm.title ? `title: ${fm.title}` : null,
     fm.description ? `description: ${fm.description}` : null,
     fm.tags.length > 0 ? `tags: [${fm.tags.join(", ")}]` : null,
+    fm.status ? `status: ${fm.status}` : null,
+    fm.supersedes.length > 0 ? `supersedes: [${fm.supersedes.join(", ")}]` : null,
   ]
     .filter((line): line is string => line !== null)
     .join("\n");

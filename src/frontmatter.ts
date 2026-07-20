@@ -1,10 +1,24 @@
 // Minimal YAML frontmatter parser for the OKF subset.
-// Handles `key: value`, `key: [a, b, c]`, quoted strings, and inline comments.
+// Handles `key: value`, `key: [a, b, c]` (flow list), quoted strings, inline
+// comments, AND block-list syntax (`key:\n  - a\n  - b`) for the list-valued
+// OKF fields (`tags`, `supersedes`). Scalar tolerance: a bare scalar value
+// for a list field (e.g. `tags: foo`) is wrapped to a single-element list so
+// a producer who forgets the brackets does not silently lose data (§9
+// permissive consumption).
+//
+// Limitations (documented, by design — see §2.3 design note): multi-line
+// scalar values, nested maps, and block lists for producer-defined keys
+// outside `tags`/`supersedes` are NOT supported; such lines are silently
+// dropped rather than rejected. Conformance-critical fields (§4.1) are all
+// scalars or flat lists, so the subset suffices for OKF v0.1 conformance.
 // No external dependency — sufficient for classification and index generation.
 
 import type { Frontmatter } from "./types.ts";
 
 const FENCE = "---";
+
+/** Frontmatter keys whose value is a list and therefore may be written as a YAML block sequence. */
+const LIST_KEYS = new Set(["tags", "supersedes"]);
 
 export interface ParsedDocument {
   readonly frontmatter: Frontmatter | null;
@@ -35,7 +49,34 @@ export function parseDocument(content: string): ParsedDocument {
 
 function parseYamlSubset(lines: string[]): Record<string, unknown> {
   const result: Record<string, unknown> = {};
+  // When non-null, we are inside a block list for this key; subsequent
+  // indented `- item` lines append to it until a non-list line ends the block.
+  let pendingListKey: string | null = null;
   for (const line of lines) {
+    if (pendingListKey !== null) {
+      const isIndented = line.startsWith(" ") || line.startsWith("\t");
+      const trimmed = line.trim();
+      // An indented `- item` line appends to the pending block list.
+      if (isIndented && trimmed.startsWith("-")) {
+        let item = trimmed.slice(1).trim();
+        // Strip inline ` #…` comments exactly like the flow-list path
+        // (parseValue) does, so `  - foo # note` yields `foo`, not
+        // `foo # note`. Only for unquoted values, matching parseValue.
+        if (!item.startsWith('"') && !item.startsWith("'")) {
+          const commentIndex = item.indexOf(" #");
+          if (commentIndex !== -1) item = item.slice(0, commentIndex).trim();
+        }
+        item = unquote(item);
+        const existing = result[pendingListKey];
+        if (Array.isArray(existing)) existing.push(item);
+        else result[pendingListKey] = [item];
+        continue;
+      }
+      // Blank lines and comments are tolerated inside a block sequence.
+      if (trimmed === "" || trimmed.startsWith("#")) continue;
+      // Anything else ends the block list and falls through to key parsing.
+      pendingListKey = null;
+    }
     const trimmed = line.trim();
     if (trimmed === "" || trimmed.startsWith("#")) continue;
     const idx = line.indexOf(":");
@@ -43,6 +84,12 @@ function parseYamlSubset(lines: string[]): Record<string, unknown> {
     const key = line.slice(0, idx).trim();
     if (key === "") continue;
     const valueRaw = line.slice(idx + 1).trim();
+    if (valueRaw === "" && LIST_KEYS.has(key)) {
+      // Start a block list; collect subsequent indented `- item` lines.
+      result[key] = [];
+      pendingListKey = key;
+      continue;
+    }
     result[key] = parseValue(valueRaw);
   }
   return result;
@@ -80,7 +127,9 @@ function toFrontmatter(raw: Record<string, unknown>): Frontmatter {
     description: asString(raw["description"]),
     resource: asString(raw["resource"]),
     timestamp: asString(raw["timestamp"]),
-    tags: asStringArray(raw["tags"]),
+    tags: asStringList(raw["tags"]),
+    status: asString(raw["status"]),
+    supersedes: asStringList(raw["supersedes"]),
     raw,
   };
 }
@@ -90,9 +139,15 @@ function asString(value: unknown): string | undefined {
   return undefined;
 }
 
-function asStringArray(value: unknown): string[] {
+/**
+ * Coerce a frontmatter value to a string list. Accepts a YAML flow/block
+ * list (Array) OR a bare scalar string, which is wrapped to a single-element
+ * list (scalar tolerance — never silently drop a forgotten-brackets value).
+ */
+function asStringList(value: unknown): string[] {
   if (Array.isArray(value)) {
     return value.filter((item): item is string => typeof item === "string");
   }
+  if (typeof value === "string" && value !== "") return [value];
   return [];
 }

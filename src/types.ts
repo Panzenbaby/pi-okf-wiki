@@ -19,7 +19,17 @@ export function err<T>(message: string, extras: Partial<AppError> = {}): Result<
   return { success: false, error: { message, ...extras } };
 }
 
-/** Parsed YAML frontmatter of a concept document. */
+/**
+ * Parsed YAML frontmatter of a concept document.
+ *
+ * `status` and `supersedes` are producer-defined OKF extensions (§4.1), not
+ * registered by the spec. They are typed here (rather than left only in `raw`)
+ * so the precedence graph is first-class: `renderConceptForPrompt` surfaces
+ * them to the query agent without it having to open the file. `status` stays
+ * an open string (the prompt convention is `current` | `superseded`, but
+ * producers MAY use other values — §9 forbids rejecting them); `supersedes`
+ * is a path list so a concept can supersede several older ones (merge).
+ */
 export interface Frontmatter {
   readonly type: string | undefined;
   readonly title: string | undefined;
@@ -27,6 +37,10 @@ export interface Frontmatter {
   readonly resource: string | undefined;
   readonly tags: readonly string[];
   readonly timestamp: string | undefined;
+  /** Producer-defined (§4.1): `current` | `superseded` by convention. Open string. */
+  readonly status: string | undefined;
+  /** Producer-defined (§4.1): bundle-relative paths to concepts this one supersedes. */
+  readonly supersedes: readonly string[];
   readonly raw: Readonly<Record<string, unknown>>;
 }
 

@@ -41,7 +41,7 @@ import {
   relativePosix,
   snapshotWiki,
   wikiPaths,
-  writeIndexMd,
+  writeAllIndexMd,
   type WikiPaths,
 } from "./wiki.ts";
 import { buildUpdatePrompt, type UpdatePromptInput } from "./prompts.ts";
@@ -156,7 +156,7 @@ class IntakeSessionImpl implements IntakeSession {
 
     const allConcepts = await loadAllConcepts(this.paths.wiki);
     if (allConcepts.success) {
-      await writeIndexMd(this.paths.wiki, allConcepts.data);
+      await writeAllIndexMd(this.paths.wiki, allConcepts.data);
     }
     await appendLogMd(this.paths.wiki, this.today, diff);
 

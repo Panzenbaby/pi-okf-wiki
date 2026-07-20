@@ -20,8 +20,11 @@ export {
 } from "./wiki/concepts.ts";
 
 export {
-  generateIndexMd,
-  writeIndexMd,
+  OKF_VERSION,
+  computeIndexDirs,
+  generateDirIndexMd,
+  generateRootIndexMd,
+  writeAllIndexMd,
   appendLogMd,
 } from "./wiki/index-log.ts";
 

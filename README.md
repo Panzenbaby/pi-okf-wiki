@@ -208,6 +208,23 @@ field. Recommended fields: `title`, `description`, `resource`, `tags`,
 [OKF spec](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md)
 for the full format.
 
+The bundle declares its target spec version via `okf_version: "0.1"` in the
+root `index.md` frontmatter (§11 — the only `index.md` permitted to carry
+frontmatter). Per OKF §6, `/wiki-update` writes one `index.md` per qualifying
+directory (root + every directory that contains a concept, directly or
+transitively) for progressive disclosure; each lists only its own direct
+concepts and immediate child subdirectories. Orphan `index.md` files in
+directories that no longer contain any concept are pruned on the next
+`/wiki-update` (best-effort).
+
+`wiki/archive/` is a **producer-specific OKF extension**, not part of the
+spec's `references/` model: it holds the raw original files (PDFs, DOCX, …)
+that back the concepts, so citation links to them stay **bundle-relative**
+(`/archive/<rel>`) — one of the three §8-sanctioned citation link forms. It is
+tolerated by the spec because consumers ignore non-`.md` files (§9); archived
+`.md` originals carry an outermost `.orig` suffix so they never count as
+concept documents (§3.1 / §9.1). `archive/` is never listed in any `index.md`.
+
 Example concept (`wiki/tables/orders.md`):
 
 ```markdown
@@ -230,10 +247,14 @@ Part of the [sales dataset](/datasets/sales.md).
 ```
 
 > **Link styles:** inside concept files, links are bundle-relative
-> (`/tables/orders.md` — relative to the `wiki/` bundle). In `/wiki-query`
-> answers, links are repo-relative (`wiki/tables/orders.md`) because the answer
-> renders outside the bundle, from the project root. These are two different
-> rendering contexts, not two competing conventions.
+> (`/tables/orders.md` — absolute, relative to the `wiki/` bundle, the §5.1
+> recommended form). In `index.md` files, links are relative to that
+> directory (`orders.md` from `tables/`, or `tables/orders.md` from the
+> root) per the §6 example. These two styles mirror the spec's own
+> conventions for concepts vs. index files, not two competing rules. In
+> `/wiki-query` answers, links are repo-relative (`wiki/tables/orders.md`)
+> because the answer renders outside the bundle, from the project root — a
+> third rendering context.
 
 ## Configuration
 
