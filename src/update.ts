@@ -29,6 +29,7 @@ import {
   pathExists,
   readTextFile,
   removeEmptyDirs,
+  removeJunkFiles,
   resolveArchiveTarget,
   writeTextFile,
 } from "./files.ts";
@@ -60,7 +61,8 @@ import { compileArchiveRewriter } from "./links.ts";
  * staged inside `input/`. Hoisted to module level so every call site passes
  * the same identity instead of allocating a fresh closure.
  */
-const skipExtractionTemp = (name: string): boolean => name === EXTRACTION_TEMP_DIR;
+const skipExtractionTemp = (name: string, _isDirectory: boolean): boolean =>
+  name === EXTRACTION_TEMP_DIR;
 
 /**
  * Immutable snapshot of the deterministic-phase state an IntakeSession owns.
@@ -318,10 +320,21 @@ export async function runUpdate(
   if (!beforeSnapshot.success) return beforeSnapshot;
   const beforeCount = beforeSnapshot.data.entries.size;
 
+  // Drop OS / file-manager metadata junk (.DS_Store, Thumbs.db, desktop.ini,
+  // AppleDouble `._*` sidecars) BEFORE collecting input files. Two reasons:
+  //  (1) these are not documents and would otherwise show up as "unsupported
+  //      file type" noise in the summary;
+  //  (2) a lone `.DS_Store` keeps its folder non-empty, which would block the
+  //      post-ingest empty-folder prune and leave `input/` cluttered.
+  // Non-fatal: a failure just means the junk survives this run.
+  const runWarnings: string[] = [];
+  const junkRemoved = await removeJunkFiles(paths.input, skipExtractionTemp);
+  if (!junkRemoved.success) {
+    runWarnings.push(`Could not remove junk files: ${junkRemoved.error.message}`);
+  }
+
   const inputFiles = await collectInputFiles(paths.input);
   if (!inputFiles.success) return inputFiles;
-
-  const runWarnings: string[] = [];
 
   if (inputFiles.data.length === 0) {
     ctx.ui.notify("input/ is empty — nothing to update.", "info");

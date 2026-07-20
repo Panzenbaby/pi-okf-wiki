@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { listFiles, pathExists, removeEmptyDirs, resolveArchiveTarget } from "../src/files.ts";
+import { listFiles, pathExists, removeEmptyDirs, removeJunkFiles, resolveArchiveTarget } from "../src/files.ts";
 
 let root: string;
 
@@ -145,5 +145,60 @@ describe("removeEmptyDirs", () => {
     expect(result.success).toBe(false);
     if (result.success) return;
     expect(result.error.message).toContain(fileRoot);
+  });
+});
+
+describe("removeJunkFiles", () => {
+  it("deletes known junk files (.DS_Store, Thumbs.db, desktop.ini) and AppleDouble ._ sidecars, keeps real files", async () => {
+    await writeFileRelative("notes/.DS_Store", "junk");
+    await writeFileRelative("notes/spec.md", "real");
+    await writeFileRelative("pics/Thumbs.db", "junk");
+    await writeFileRelative("pics/desktop.ini", "junk");
+    await writeFileRelative("pics/._photo.jpg", "apple-double");
+    await writeFileRelative("pics/keep.txt", "real");
+
+    const result = await removeJunkFiles(root);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data).toBe(4);
+
+    expect(await pathExists(join(root, "notes", "spec.md"))).toBe(true);
+    expect(await pathExists(join(root, "pics", "keep.txt"))).toBe(true);
+    expect(await pathExists(join(root, "notes", ".DS_Store"))).toBe(false);
+    expect(await pathExists(join(root, "pics", "Thumbs.db"))).toBe(false);
+    expect(await pathExists(join(root, "pics", "desktop.ini"))).toBe(false);
+    expect(await pathExists(join(root, "pics", "._photo.jpg"))).toBe(false);
+  });
+
+  it("skips directories whose name the predicate returns true for", async () => {
+    // A `.okf-extract` dir holds a junk file but is skipped, so it survives.
+    await mkdir(join(root, ".okf-extract"), { recursive: true });
+    await writeFile(join(root, ".okf-extract", ".DS_Store"), "junk", "utf8");
+
+    const result = await removeJunkFiles(root, (name) => name === ".okf-extract");
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data).toBe(0);
+    expect(await pathExists(join(root, ".okf-extract", ".DS_Store"))).toBe(true);
+  });
+
+  it("returns ok(0) on a missing root", async () => {
+    const missing = join(root, "does-not-exist");
+    const result = await removeJunkFiles(missing);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data).toBe(0);
+  });
+
+  it("leaves non-junk dotfiles alone (only ._ prefix and the known set are junk)", async () => {
+    await writeFileRelative(".gitignore", "real");
+    await writeFileRelative(".hidden", "real");
+
+    const result = await removeJunkFiles(root);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data).toBe(0);
+    expect(await pathExists(join(root, ".gitignore"))).toBe(true);
+    expect(await pathExists(join(root, ".hidden"))).toBe(true);
   });
 });

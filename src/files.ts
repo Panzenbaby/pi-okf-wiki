@@ -2,7 +2,7 @@
 
 import { createHash } from "node:crypto";
 import type { Dirent } from "node:fs";
-import { copyFile as copyFileFn, mkdir, readFile, readdir, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
+import { copyFile as copyFileFn, mkdir, readFile, readdir, rename, rm, rmdir, stat, unlink, writeFile } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import { err, ok, type Result } from "./types.ts";
 
@@ -271,6 +271,89 @@ function isNotEmpty(error: unknown): boolean {
 function isErrorWithCode(error: unknown, code: string): boolean {
   return typeof error === "object" && error !== null && "code" in error &&
     (error as { code?: unknown }).code === code;
+}
+
+/**
+ * Well-known OS / file-manager metadata files that have nothing to do with the
+ * documents being ingested. They are silently dropped so they don't show up as
+ * "unsupported file type" in the summary and — more importantly — so they
+ * don't keep their parent folder non-empty, which would block
+ * {@link removeEmptyDirs} from leaving `input/` truly clean.
+ */
+const JUNK_FILE_NAMES = new Set([
+  ".DS_Store", // macOS Finder
+  "Thumbs.db", // Windows Explorer
+  "ehthumbs.db", // Windows Explorer (media)
+  "ehthumbs_vista.db",
+  "desktop.ini", // Windows folder customisation
+]);
+
+function isJunkFileName(name: string): boolean {
+  if (JUNK_FILE_NAMES.has(name)) return true;
+  // AppleDouble resource-fork sidecars created by macOS on non-HFS volumes,
+  // e.g. `._spec.pdf` next to `spec.pdf`. Always safe to drop.
+  return name.startsWith("._") && name.length > 2;
+}
+
+/**
+ * Recursively delete OS-metadata junk files under `root` (the well-known set
+ * in {@link JUNK_FILE_NAMES} plus AppleDouble `._*` sidecars). Directories
+ * listed in `skip` (by base name) are pruned — neither descended into — so a
+ * residual extraction temp dir is left untouched.
+ *
+ * Best-effort: a per-file unlink failure (e.g. permission) does NOT abort the
+ * walk — the file is skipped and the run continues. The returned count is the
+ * number of files actually removed. A genuine `readdir` failure (the tree
+ * can't be walked at all) surfaces as `err` with the offending path; in that
+ * case no count is returned.
+ */
+export async function removeJunkFiles(
+  root: string,
+  skip?: (entryName: string, isDirectory: boolean) => boolean,
+): Promise<Result<number>> {
+  const walk = async (dir: string): Promise<Result<number>> => {
+    let entries: Dirent[];
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch (error) {
+      if (isNotFound(error)) return ok(0);
+      return err<number>(`Failed to read directory ${dir}`, {
+        path: dir,
+        cause: errorMessage(error),
+      });
+    }
+    let removed = 0;
+    for (const entry of entries) {
+      const isDirectory = entry.isDirectory();
+      // `skip` applies to DIRECTORY entries only — it prunes subtrees (e.g.
+      // the `.okf-extract` temp dir). A regular file that happens to share the
+      // skipped name is still subject to junk removal.
+      if (isDirectory && skip !== undefined && skip(entry.name, isDirectory)) continue;
+      const absolutePath = join(dir, entry.name);
+      if (isDirectory) {
+        const sub = await walk(absolutePath);
+        if (!sub.success) return sub;
+        removed += sub.data;
+        continue;
+      }
+      // NOTE: `entry.isFile()` is false for symlinks (Dirent reflects the
+      // entry type, not the resolved target), so a symlink named `.DS_Store`
+      // or `._foo` is NOT cleaned here. Intentional — we don't follow or
+      // chase symlinks — documented so it isn't read as a bug later.
+      if (!entry.isFile() || !isJunkFileName(entry.name)) continue;
+      try {
+        await unlink(absolutePath);
+        removed++;
+      } catch (error) {
+        // ENOENT: raced away, nothing to remove — fine. Any other unlink
+        // failure is non-fatal for best-effort junk cleanup: skip the file,
+        // keep the partial count, and move on. The next run retries.
+        if (isNotFound(error)) continue;
+      }
+    }
+    return ok(removed);
+  };
+  return walk(root);
 }
 
 export async function pathExists(path: string): Promise<boolean> {
