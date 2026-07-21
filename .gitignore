@@ -6,6 +6,9 @@ node_modules/
 *.d.ts
 !src/index.ts
 
+# Hand-written source declarations (not build output)
+!src/**/*.d.ts
+
 # Logs
 *.log
 npm-debug.log*
