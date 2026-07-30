@@ -67,15 +67,14 @@ available. Reload after upgrading with `/reload`.
 
 `/wiki-update` classifies every file in `input/` into one of three buckets:
 
-1. **Conformant** — a `.md` file with parseable YAML frontmatter and a
-   non-empty `type` field. Taken over deterministically (no LLM): the file is
-   written to `wiki/<relative-path>` and only then moved from `input/` to
-   `archive/`. Its concept ID is the path without `.md`.
+1. **Conformant** — a `.md` (or `.markdown`) file with parseable YAML
+   frontmatter and a non-empty `type` field. Taken over deterministically (no
+   LLM): the file is written to `wiki/<relative-path>` and only then moved from
+   `input/` to `archive/`. Its concept ID is the path without the extension; a
+   `.markdown` input is written as `.md`, since the wiki only loads `.md`.
 2. **Non-conformant** — everything else worth reading: a `.md` lacking
-   frontmatter or a non-empty `type` field; plain text (`.txt`, `.csv`, `.json`)
-   and images (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.bmp`) read directly by
-   Pi's `read` tool; and binary/structured documents (`.pdf`, `.docx`, `.pptx`,
-   `.xlsx`, `.odt`, `.html`/`.htm`, `.epub`, `.rtf`) which the extension
+   frontmatter or a non-empty `type` field; plain text and images read directly
+   by Pi's `read` tool; and binary/structured documents which the extension
    **pre-extracts to plain text** into a temp
    `input/.okf-extract/<relative-dir>/<stem>-extracted.txt` and hands *that* to
    the agent (see [Supported formats](#supported-formats)). These are handed to
@@ -124,10 +123,16 @@ OKF /wiki-update summary
 
 | Bucket | Extensions | How they reach the agent |
 | --- | --- | --- |
-| Conformant (deterministic) | `.md` with frontmatter `type` | Copied to `wiki/` directly, no LLM. |
-| Plain text (read directly) | `.txt`, `.csv`, `.json` | Pi's `read` tool. |
+| Conformant (deterministic) | `.md` / `.markdown` with frontmatter `type` | Copied to `wiki/` directly, no LLM. |
+| Plain text (read directly) | `.txt`, `.csv`, `.tsv`, `.json`, `.yaml`/`.yml`, `.toml`, `.dsl`, `.mmd`/`.mermaid`, `.puml`/`.plantuml`, `.dot`/`.gv`, `.rst`, `.adoc`/`.asciidoc`, `.org` | Pi's `read` tool. |
 | Images (vision) | `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.bmp` | Pi's `read` tool. |
-| Extracted to text | `.pdf`, `.docx`, `.pptx`, `.xlsx`, `.odt`, `.html`/`.htm`, `.epub`, `.rtf` | Pre-extracted to `input/.okf-extract/<rel-dir>/<stem>-extracted.txt`; the agent reads that. The original is archived; a copy of the extracted text is archived next to it. |
+| Extracted to text | `.pdf`, `.docx`, `.pptx`, `.xlsx`, `.odt`, `.ods`, `.odp`, `.html`/`.htm`, `.epub`, `.rtf`, `.jsonl`/`.ndjson`, `.ipynb` | Pre-extracted to `input/.okf-extract/<rel-dir>/<stem>-extracted.txt`; the agent reads that. The original is archived; a copy of the extracted text is archived next to it. |
+
+The plain-text bucket is a deliberate allowlist, not a "does it decode as
+text?" sniff — sniffing would swallow lockfiles, keys and minified bundles,
+and `unsupported` is a more useful signal. `.dsl` covers diagram/architecture
+DSLs (including the text Miro's MCP tools read and write) and is intentionally
+not parsed: that grammar is served at runtime and versioned server-side.
 
 Extraction libraries (runtime dependencies of the extension):
 
@@ -136,9 +141,21 @@ Extraction libraries (runtime dependencies of the extension):
 | `.pdf` | [`unpdf`](https://www.npmjs.com/package/unpdf) |
 | `.docx` | [`mammoth`](https://www.npmjs.com/package/mammoth) |
 | `.xlsx` | [`exceljs`](https://www.npmjs.com/package/exceljs) (rendered as markdown tables) |
-| `.pptx` / `.odt` / `.epub` | [`jszip`](https://www.npmjs.com/package/jszip) + an XML-text stripper |
+| `.pptx` / `.odt` / `.ods` / `.odp` / `.epub` | [`jszip`](https://www.npmjs.com/package/jszip) + XML readers (`.ods` keeps rows/columns as markdown tables, `.odp` keeps slide boundaries) |
 | `.html` | [`html-to-text`](https://www.npmjs.com/package/html-to-text) |
 | `.rtf` | dependency-free RTF stripper (control words + destination groups) |
+| `.jsonl` / `.ndjson` | dependency-free record renderer (one pretty block per record) |
+| `.ipynb` | dependency-free notebook reader (markdown + code cells, outputs dropped) |
+
+### Large JSONL files are split
+
+A `.jsonl`/`.ndjson` source is staged in parts of **1000 records**, named
+`<stem>-extracted.part01.txt`, `part02`, … Records stay numbered continuously
+across parts, and unparseable lines are skipped with a warning rather than
+failing the whole file. The parts remain **one** input file everywhere else:
+one prompt entry, one archived original, and the agent is told to treat them as
+a single document. Every other format stages exactly one
+`<stem>-extracted.txt`, unchanged.
 
 Extraction failures are reported with a stable code and never archive the
 original: `encrypted` (password-protected), `empty` (no extractable text),
@@ -290,13 +307,15 @@ leaks outside its repository.
 | `src/update.ts` | `/wiki-update` command logic and the `IntakeSession` (finalize) that owns the agent-handoff state, including the post-agent citation-link rewrite (`rewriteArchiveCitationsInConcepts`). |
 | `src/classifier.ts` | `InputClassifier` that owns the full input→bucket pipeline AND the deterministic conformant intake: tentative dispatch by extension, the extraction pass (staging extracted text), and pass 3 — read + verify frontmatter + write to `wiki/` + archive original — for conformant `.md` files. Emits the three final buckets (`conformantImported` / `forAgent` / `ignored`) once, in input order. |
 | `src/query.ts` | `/wiki-query` command logic and the `QuerySession` that owns the pending question. Both `buildWikiQueryContext` and `runQuery` take an optional `Retriever` (default `TermFrequencyRetriever`) so the scoring strategy is injectable. |
-| `src/extract/types.ts` | `ExtractedText` AppModel, `DocumentExtractorRepository` interface, extraction-failure cause codes. |
+| `src/extract/types.ts` | `ExtractedText` AppModel (one or more text parts), `DocumentExtractorRepository` interface, extraction-failure cause codes. |
 | `src/extract/pdf.ts` | `PdfRepository` (`unpdf`). |
 | `src/extract/docx.ts` | `DocxRepository` (`mammoth`). |
 | `src/extract/sheet.ts` | `SheetRepository` (`exceljs`), rendering worksheets as markdown tables. |
-| `src/extract/office-xml.ts` | `PptxRepository`, `OdtRepository`, `EpubRepository` (shared `jszip` + XML helpers, EPUB spine-order). |
+| `src/extract/office-xml.ts` | `PptxRepository`, `OdtRepository`, `OdsRepository`, `OdpRepository`, `EpubRepository` (shared `jszip` + XML helpers, EPUB spine-order). |
 | `src/extract/html.ts` | `HtmlRepository` (`html-to-text`). |
 | `src/extract/rtf.ts` | `RtfRepository` (dependency-free RTF stripper). |
+| `src/extract/jsonl.ts` | `JsonLinesRepository` (`.jsonl`/`.ndjson`), the only extractor that splits its output into parts. |
+| `src/extract/notebook.ts` | `NotebookRepository` (`.ipynb`), markdown + code cells, outputs dropped. |
 | `src/extract/registry.ts` | Format taxonomy + `ExtractorRegistry` dispatch. |
 | `src/extract/service.ts` | Extraction-to-temp-file orchestration and the `.okf-extract/` lifecycle. |
 | `src/extract/util.ts` | Shared `Result<T>` failure + error-message helpers for repositories. |

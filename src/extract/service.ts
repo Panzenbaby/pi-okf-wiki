@@ -13,12 +13,18 @@ import { ok, type Result } from "../types.ts";
 import { extractFile } from "./registry.ts";
 import type { ExtractedText } from "./types.ts";
 
-/** A successfully extracted text artifact staged for the agent to read. */
+/**
+ * A successfully extracted text artifact staged for the agent to read.
+ *
+ * Most formats yield exactly one file. A repository that splits its output
+ * (JSONL) yields several, ordered; the input file still counts as ONE unit
+ * everywhere else (one prompt entry, one archive target for the original).
+ */
 export interface ExtractedArtifact {
-  /** Absolute path to the temp extracted `.txt` (inside `input/.okf-extract/`). */
-  readonly extractedTextPath: string;
-  /** Path relative to `.okf-extract/`, mirroring the original (e.g. `notes/foo-extracted.txt`). */
-  readonly tempRelativeName: string;
+  /** Absolute paths to the temp extracted `.txt` files (inside `input/.okf-extract/`). */
+  readonly extractedTextPaths: readonly string[];
+  /** Paths relative to `.okf-extract/`, mirroring the original (e.g. `notes/foo-extracted.txt`). */
+  readonly tempRelativeNames: readonly string[];
   /** Source format id (e.g. "docx"). */
   readonly sourceFormat: string;
 }
@@ -49,15 +55,24 @@ export async function extractToTempFile(
   const extracted: Result<ExtractedText> = await extractFile(absolutePath, extension);
   if (!extracted.success) return extracted;
 
-  const tempRelativeName = await tempRelativeNameFor(inputRoot, relativePath, extension);
-  const extractedTextPath = join(inputRoot, EXTRACTION_TEMP_DIR, tempRelativeName);
-
-  const write = await writeTextFile(extractedTextPath, extracted.data.text);
-  if (!write.success) return write;
+  const parts = extracted.data.parts;
+  const tempRelativeNames = await tempRelativeNamesFor(
+    inputRoot,
+    relativePath,
+    extension,
+    parts.length,
+  );
+  const extractedTextPaths: string[] = [];
+  for (let index = 0; index < parts.length; index++) {
+    const path = join(inputRoot, EXTRACTION_TEMP_DIR, tempRelativeNames[index] ?? "");
+    const write = await writeTextFile(path, parts[index] ?? "");
+    if (!write.success) return write;
+    extractedTextPaths.push(path);
+  }
 
   return ok<ExtractedArtifact>({
-    extractedTextPath,
-    tempRelativeName,
+    extractedTextPaths,
+    tempRelativeNames,
     sourceFormat: extracted.data.sourceFormat,
   });
 }
@@ -70,13 +85,17 @@ export async function extractToTempFile(
 export async function archiveExtractedText(
   inputRoot: string,
   archiveDir: string,
-  tempRelativeName: string,
+  tempRelativeNames: readonly string[],
   resolveArchiveTarget: (archive: string, relative: string) => Promise<string>,
 ): Promise<Result<void>> {
-  const source = join(inputRoot, EXTRACTION_TEMP_DIR, tempRelativeName);
-  if (!(await pathExists(source))) return ok(undefined);
-  const destination = await resolveArchiveTarget(archiveDir, tempRelativeName);
-  return copyFile(source, destination);
+  for (const tempRelativeName of tempRelativeNames) {
+    const source = join(inputRoot, EXTRACTION_TEMP_DIR, tempRelativeName);
+    if (!(await pathExists(source))) continue;
+    const destination = await resolveArchiveTarget(archiveDir, tempRelativeName);
+    const copied = await copyFile(source, destination);
+    if (!copied.success) return copied;
+  }
+  return ok(undefined);
 }
 
 /** Remove the whole extraction temp dir once finalize is done. */
@@ -85,9 +104,13 @@ export async function cleanupExtractionTemp(inputRoot: string): Promise<Result<v
 }
 
 /**
- * Compute the temp relative name for `relativePath`: `<relDir>/<stem>-extracted.txt`.
- * If that name is already taken inside this run (same stem, different extension
- * in the same directory), fall back to `<stem>.<extWithoutDot>-extracted.txt`.
+ * Compute the temp relative name(s) for `relativePath`. A single-part
+ * extraction keeps the historical `<relDir>/<stem>-extracted.txt`; a split one
+ * numbers its parts `<relDir>/<stem>-extracted.part01.txt`, so adding the split
+ * capability changed no path for the formats that never split.
+ *
+ * If the base name is already taken inside this run (same stem, different
+ * extension in the same directory), fall back to `<stem>.<extWithoutDot>-extracted`.
  *
  * Invariant: this single-level fallback is sufficient because (a) the temp dir
  * is wiped at the start of every run (cleanExtractionTemp), so no cross-run
@@ -96,21 +119,34 @@ export async function cleanupExtractionTemp(inputRoot: string): Promise<Result<v
  * fallback is therefore always unique. If a future scenario breaks this
  * invariant, add a numeric suffix loop here.
  */
-async function tempRelativeNameFor(
+async function tempRelativeNamesFor(
   inputRoot: string,
   relativePath: string,
   extension: string,
-): Promise<string> {
-  const parts = relativePath.split("/");
-  const fileName = parts[parts.length - 1] ?? relativePath;
-  const dirParts = parts.slice(0, -1);
+  partCount: number,
+): Promise<readonly string[]> {
+  const segments = relativePath.split("/");
+  const fileName = segments[segments.length - 1] ?? relativePath;
+  const dirParts = segments.slice(0, -1);
   const dot = fileName.lastIndexOf(".");
   const stem = dot > 0 ? fileName.slice(0, dot) : fileName;
-  const plain = [...dirParts, `${stem}-extracted.txt`].join("/");
-  const plainPath = join(inputRoot, EXTRACTION_TEMP_DIR, plain);
-  if (!(await pathExists(plainPath))) return plain;
+
+  const plainNames = partNames([...dirParts, `${stem}-extracted`].join("/"), partCount);
+  const firstPlain = plainNames[0] ?? "";
+  if (!(await pathExists(join(inputRoot, EXTRACTION_TEMP_DIR, firstPlain)))) {
+    return plainNames;
+  }
   const extWithoutDot = extension.replace(/^\./, "");
-  return [...dirParts, `${stem}.${extWithoutDot}-extracted.txt`].join("/");
+  return partNames([...dirParts, `${stem}.${extWithoutDot}-extracted`].join("/"), partCount);
+}
+
+function partNames(base: string, partCount: number): readonly string[] {
+  if (partCount <= 1) return [`${base}.txt`];
+  const names: string[] = [];
+  for (let index = 1; index <= partCount; index++) {
+    names.push(`${base}.part${String(index).padStart(2, "0")}.txt`);
+  }
+  return names;
 }
 
 function extensionOf(relativePath: string): string {

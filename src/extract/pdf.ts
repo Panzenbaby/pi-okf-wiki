@@ -39,7 +39,7 @@ export class PdfRepository implements DocumentExtractorRepository {
         return extractionFailure("empty", "PDF yielded no text (scanned image or empty).", absolutePath);
       }
       return ok<ExtractedText>({
-        text,
+        parts: [text],
         sourceFormat: this.sourceFormat,
         warnings: dto.totalPages > 0 ? [`pages: ${dto.totalPages}`] : [],
       });

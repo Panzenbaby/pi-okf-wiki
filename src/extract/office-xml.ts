@@ -1,10 +1,17 @@
 // Zip-based XML repositories for formats that are just zipped XML:
 //   - PptxRepository (.pptx)  -> reads `ppt/slides/slideN.xml`, extracts `<a:t>` text.
 //   - OdtRepository   (.odt)   -> reads `content.xml`, strips tags.
+//   - OdsRepository   (.ods)   -> reads `content.xml`, renders each sheet as a table.
+//   - OdpRepository   (.odp)   -> reads `content.xml`, one block per `<draw:page>`.
 //   - EpubRepository   (.epub)  -> reads every `.xhtml`/`.html` part, strips tags.
 //
-// All three share a `jszip` helper. The JSZip object (Dto) never leaks; each
+// They share a `jszip` helper. The JSZip object (Dto) never leaks; each
 // repository returns the `ExtractedText` AppModel wrapped in `Result<T>`.
+//
+// `.ods` and `.odp` do NOT reuse OdtRepository's blunt tag stripping: flattening
+// their content.xml would dissolve row/column and slide boundaries, leaving them
+// worse off than their OOXML twins (.xlsx keeps a markdown table, .pptx keeps
+// `## Slide N`). Both therefore parse their own structural elements.
 
 import { readFile } from "node:fs/promises";
 
@@ -53,7 +60,7 @@ abstract class ZipXmlRepository implements DocumentExtractorRepository {
       if (text.length === 0) {
         return extractionFailure("empty", `${this.sourceFormat} yielded no text.`, absolutePath);
       }
-      return ok<ExtractedText>({ text, sourceFormat: this.sourceFormat, warnings });
+      return ok<ExtractedText>({ parts: [text], sourceFormat: this.sourceFormat, warnings });
     } catch (error) {
       return extractionFailure("extraction_failed", `${this.sourceFormat} extraction failed: ${message(error)}`, absolutePath);
     }
@@ -96,6 +103,149 @@ export class OdtRepository extends ZipXmlRepository {
     const xml = await content.async("string");
     return stripXmlTags(xml);
   }
+}
+
+/**
+ * Cap on how often a single `table:number-{columns,rows}-repeated` run is
+ * materialised. ODS routinely pads a sheet to the full grid width with a single
+ * repeated empty cell (counts in the thousands); expanding those literally
+ * would blow up the rendered table for no content.
+ */
+const MAX_REPEAT = 256;
+
+/** Maximum rows rendered per sheet, mirroring SheetRepository's cap for .xlsx. */
+const MAX_ROWS_PER_SHEET = 5000;
+
+// Element matchers. The `(?=[\s>/])` lookahead stops an element from matching a
+// sibling that merely shares its prefix (`table:table` must not swallow
+// `table:table-row`). Group 1 is the attribute list, group 2 the inner XML.
+// These are module constants because `String.matchAll` clones the regex rather
+// than advancing this one's `lastIndex` — recompiling them per row would mean
+// tens of thousands of compilations on a large sheet.
+const TABLE_PATTERN = /<table:table(?=[\s>/])([^>]*?)(?:\/>|>([\s\S]*?)<\/table:table>)/g;
+const ROW_PATTERN = /<table:table-row(?=[\s>/])([^>]*?)(?:\/>|>([\s\S]*?)<\/table:table-row>)/g;
+const PAGE_PATTERN = /<draw:page(?=[\s>/])([^>]*?)(?:\/>|>([\s\S]*?)<\/draw:page>)/g;
+// Covered cells are the placeholders a merged range leaves behind. They carry no
+// visible content but MUST still occupy a column, or every cell after a merge
+// shifts left and the rendered table misaligns with its header.
+const CELL_PATTERN =
+  /<table:(covered-table-cell|table-cell)(?=[\s>/])([^>]*?)(?:\/>|>([\s\S]*?)<\/table:\1>)/g;
+const COLUMNS_REPEATED_PATTERN = /\btable:number-columns-repeated="([^"]*)"/;
+const ROWS_REPEATED_PATTERN = /\btable:number-rows-repeated="([^"]*)"/;
+const TABLE_NAME_PATTERN = /\btable:name="([^"]*)"/;
+
+export class OdsRepository extends ZipXmlRepository {
+  readonly supportedExtensions = [".ods"] as const;
+  readonly sourceFormat = "ods";
+
+  protected async render(zip: JSZipDto, warnings: string[]): Promise<string> {
+    const content = zip.file("content.xml");
+    if (content === null) return "";
+    const xml = await content.async("string");
+    const sheets: string[] = [];
+    for (const table of xml.matchAll(TABLE_PATTERN)) {
+      const name = attributeOf(table[1] ?? "", TABLE_NAME_PATTERN) ?? `Sheet ${sheets.length + 1}`;
+      const rendered = renderSheet(name, table[2] ?? "", warnings);
+      if (rendered.length > 0) sheets.push(rendered);
+    }
+    return sheets.join("\n\n");
+  }
+}
+
+export class OdpRepository extends ZipXmlRepository {
+  readonly supportedExtensions = [".odp"] as const;
+  readonly sourceFormat = "odp";
+
+  protected async render(zip: JSZipDto): Promise<string> {
+    const content = zip.file("content.xml");
+    if (content === null) return "";
+    const xml = await content.async("string");
+    const slides: string[] = [];
+    let slideNumber = 0;
+    for (const page of xml.matchAll(PAGE_PATTERN)) {
+      slideNumber++;
+      const text = stripXmlTags(page[2] ?? "");
+      if (text.length === 0) continue;
+      slides.push(`## Slide ${slideNumber}\n\n${text}`);
+    }
+    return slides.join("\n\n");
+  }
+}
+
+/** Render one `<table:table>` body as a markdown table, or "" when it is blank. */
+function renderSheet(name: string, tableXml: string, warnings: string[]): string {
+  const rows: string[][] = [];
+  let truncated = false;
+  for (const rowMatch of tableXml.matchAll(ROW_PATTERN)) {
+    const cells = parseRowCells(rowMatch[2] ?? "");
+    const repeat = repeatCountOf(rowMatch[1] ?? "", ROWS_REPEATED_PATTERN);
+    for (let copy = 0; copy < repeat; copy++) {
+      if (rows.length >= MAX_ROWS_PER_SHEET) {
+        truncated = true;
+        break;
+      }
+      rows.push(cells);
+    }
+    if (truncated) break;
+  }
+  if (truncated) {
+    warnings.push(`Sheet "${name}": truncated to ${MAX_ROWS_PER_SHEET} rows.`);
+  }
+
+  while (rows.length > 0 && isBlankRow(rows[rows.length - 1])) rows.pop();
+  if (rows.length === 0) return "";
+  const width = Math.max(...rows.map((row) => row.length));
+  if (width === 0) return "";
+
+  const header = padRow(rows[0] ?? [], width);
+  const separator = Array<string>(width).fill("---");
+  const body = rows.slice(1).map((row) => padRow(row, width));
+  return [
+    `## Sheet: ${name}`,
+    "",
+    toTableLine(header),
+    toTableLine(separator),
+    ...body.map(toTableLine),
+  ].join("\n");
+}
+
+/** Expand a row's cells, honouring `table:number-columns-repeated`, then trim the trailing filler. */
+function parseRowCells(rowXml: string): string[] {
+  const cells: string[] = [];
+  for (const cellMatch of rowXml.matchAll(CELL_PATTERN)) {
+    const text = stripXmlTags(cellMatch[3] ?? "").replace(/\|/g, "\\|");
+    const repeat = repeatCountOf(cellMatch[2] ?? "", COLUMNS_REPEATED_PATTERN);
+    for (let copy = 0; copy < repeat; copy++) cells.push(text);
+  }
+  while (cells.length > 0 && (cells[cells.length - 1] ?? "").length === 0) cells.pop();
+  return cells;
+}
+
+function repeatCountOf(attributes: string, pattern: RegExp): number {
+  const raw = attributeOf(attributes, pattern);
+  if (raw === undefined) return 1;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) return 1;
+  return Math.min(parsed, MAX_REPEAT);
+}
+
+function attributeOf(attributes: string, pattern: RegExp): string | undefined {
+  const match = attributes.match(pattern);
+  return match === null ? undefined : decodeEntities(match[1] ?? "");
+}
+
+function isBlankRow(row: readonly string[] | undefined): boolean {
+  return row === undefined || row.every((cell) => cell.length === 0);
+}
+
+function padRow(row: readonly string[], width: number): string[] {
+  const padded = row.slice();
+  while (padded.length < width) padded.push("");
+  return padded;
+}
+
+function toTableLine(cells: readonly string[]): string {
+  return `| ${cells.join(" | ")} |`;
 }
 
 export class EpubRepository extends ZipXmlRepository {

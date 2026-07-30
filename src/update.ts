@@ -186,12 +186,12 @@ class IntakeSessionImpl implements IntakeSession {
     // (i.e. not leftover). Leftover originals keep their temp text only until the
     // cleanup below removes it — it is regenerated on the next run.
     for (const file of this.nonConformant) {
-      if (file.tempRelativeName === undefined) continue;
+      if (file.tempRelativeNames === undefined) continue;
       if (leftoverSet.has(file.relativePath)) continue;
       const archived = await archiveExtractedText(
         this.paths.input,
         this.paths.archive,
-        file.tempRelativeName,
+        file.tempRelativeNames,
         resolveArchiveTarget,
       );
       if (!archived.success) {
@@ -393,7 +393,7 @@ export async function runUpdate(
       relativePath: file.relativePath,
       absolutePath: file.absolutePath,
       archiveTarget: target,
-      extractedTextPath: file.extractedTextPath,
+      extractedTextPaths: file.extractedTextPaths,
       sourceFormat: file.sourceFormat,
     });
   }

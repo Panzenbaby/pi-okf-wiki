@@ -8,7 +8,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { DocxRepository } from "../src/extract/docx.ts";
 import { HtmlRepository } from "../src/extract/html.ts";
-import { EpubRepository, OdtRepository, PptxRepository } from "../src/extract/office-xml.ts";
+import {
+  EpubRepository,
+  OdpRepository,
+  OdsRepository,
+  OdtRepository,
+  PptxRepository,
+} from "../src/extract/office-xml.ts";
 import { PdfRepository } from "../src/extract/pdf.ts";
 import { RtfRepository } from "../src/extract/rtf.ts";
 import { SheetRepository } from "../src/extract/sheet.ts";
@@ -41,11 +47,11 @@ describe("HtmlRepository", () => {
     expect(result.success).toBe(true);
     if (!result.success) return;
     expect(result.data.sourceFormat).toBe("html");
-    expect(result.data.text).toContain("TITLE");
-    expect(result.data.text).toContain("Hello");
-    expect(result.data.text).toContain("world");
-    expect(result.data.text).not.toContain("ignore");
-    expect(result.data.text).not.toContain("<b>");
+    expect(result.data.parts.join("\n")).toContain("TITLE");
+    expect(result.data.parts.join("\n")).toContain("Hello");
+    expect(result.data.parts.join("\n")).toContain("world");
+    expect(result.data.parts.join("\n")).not.toContain("ignore");
+    expect(result.data.parts.join("\n")).not.toContain("<b>");
   });
 
   it("reports empty when the document has no text", async () => {
@@ -79,7 +85,7 @@ describe("DocxRepository", () => {
     expect(result.success).toBe(true);
     if (!result.success) return;
     expect(result.data.sourceFormat).toBe("docx");
-    expect(result.data.text).toContain("Hello DOCX World");
+    expect(result.data.parts.join("\n")).toContain("Hello DOCX World");
   });
 
   it("maps a missing file to extraction_failed", async () => {
@@ -104,11 +110,11 @@ describe("SheetRepository", () => {
     expect(result.success).toBe(true);
     if (!result.success) return;
     expect(result.data.sourceFormat).toBe("xlsx");
-    expect(result.data.text).toContain("## Sheet: Orders");
-    expect(result.data.text).toContain("order_id");
-    expect(result.data.text).toContain("customer_id");
-    expect(result.data.text).toContain("| o1 | c1 |");
-    expect(result.data.text).toContain("| o2 | c2 |");
+    expect(result.data.parts.join("\n")).toContain("## Sheet: Orders");
+    expect(result.data.parts.join("\n")).toContain("order_id");
+    expect(result.data.parts.join("\n")).toContain("customer_id");
+    expect(result.data.parts.join("\n")).toContain("| o1 | c1 |");
+    expect(result.data.parts.join("\n")).toContain("| o2 | c2 |");
   });
 });
 
@@ -129,11 +135,11 @@ describe("PptxRepository", () => {
     const result = await new PptxRepository().extract(path);
     expect(result.success).toBe(true);
     if (!result.success) return;
-    expect(result.data.text).toContain("## Slide 1");
-    expect(result.data.text).toContain("First slide");
-    expect(result.data.text).toContain("## Slide 2");
-    expect(result.data.text).toContain("Second slide");
-    expect(result.data.text.indexOf("First slide")).toBeLessThan(result.data.text.indexOf("Second slide"));
+    expect(result.data.parts.join("\n")).toContain("## Slide 1");
+    expect(result.data.parts.join("\n")).toContain("First slide");
+    expect(result.data.parts.join("\n")).toContain("## Slide 2");
+    expect(result.data.parts.join("\n")).toContain("Second slide");
+    expect(result.data.parts.join("\n").indexOf("First slide")).toBeLessThan(result.data.parts.join("\n").indexOf("Second slide"));
   });
 });
 
@@ -150,7 +156,136 @@ describe("OdtRepository", () => {
     const result = await new OdtRepository().extract(path);
     expect(result.success).toBe(true);
     if (!result.success) return;
-    expect(result.data.text).toContain("Hello & goodbye");
+    expect(result.data.parts.join("\n")).toContain("Hello & goodbye");
+  });
+});
+
+async function odsFixture(name: string, contentXml: string): Promise<string> {
+  const zip = new JSZip();
+  zip.file("content.xml", `<?xml version="1.0"?>${contentXml}`);
+  return fixture(name, await zip.generateAsync({ type: "nodebuffer" }));
+}
+
+describe("OdsRepository", () => {
+  it("renders each sheet as a markdown table, preserving rows and columns", async () => {
+    const path = await odsFixture(
+      "book.ods",
+      `<office:document><office:body><office:spreadsheet>
+         <table:table table:name="Orders">
+           <table:table-row>
+             <table:table-cell><text:p>Name</text:p></table:table-cell>
+             <table:table-cell><text:p>Qty</text:p></table:table-cell>
+           </table:table-row>
+           <table:table-row>
+             <table:table-cell><text:p>Widget</text:p></table:table-cell>
+             <table:table-cell><text:p>7</text:p></table:table-cell>
+           </table:table-row>
+         </table:table>
+       </office:spreadsheet></office:body></office:document>`,
+    );
+    const result = await new OdsRepository().extract(path);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.sourceFormat).toBe("ods");
+    const text = result.data.parts.join("\n");
+    expect(text).toContain("## Sheet: Orders");
+    expect(text).toContain("| Name | Qty |");
+    expect(text).toContain("| Widget | 7 |");
+  });
+
+  it("expands repeated cells but trims the trailing filler ODS emits", async () => {
+    const path = await odsFixture(
+      "repeat.ods",
+      `<office:document><office:body><office:spreadsheet>
+         <table:table table:name="S">
+           <table:table-row>
+             <table:table-cell><text:p>A</text:p></table:table-cell>
+             <table:table-cell table:number-columns-repeated="2"><text:p>R</text:p></table:table-cell>
+             <table:table-cell table:number-columns-repeated="1013"/>
+           </table:table-row>
+         </table:table>
+       </office:spreadsheet></office:body></office:document>`,
+    );
+    const result = await new OdsRepository().extract(path);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    const text = result.data.parts.join("\n");
+    expect(text).toContain("| A | R | R |");
+    // The 1013 trailing empty cells must not be materialised into the table.
+    expect(text.length).toBeLessThan(200);
+  });
+
+  it("keeps columns aligned across merged cells", async () => {
+    const path = await odsFixture(
+      "merged.ods",
+      `<office:document><office:body><office:spreadsheet>
+         <table:table table:name="M">
+           <table:table-row>
+             <table:table-cell><text:p>H1</text:p></table:table-cell>
+             <table:table-cell><text:p>H2</text:p></table:table-cell>
+             <table:table-cell><text:p>H3</text:p></table:table-cell>
+           </table:table-row>
+           <table:table-row>
+             <table:table-cell table:number-columns-spanned="2"><text:p>wide</text:p></table:table-cell>
+             <table:covered-table-cell/>
+             <table:table-cell><text:p>tail</text:p></table:table-cell>
+           </table:table-row>
+         </table:table>
+       </office:spreadsheet></office:body></office:document>`,
+    );
+    const result = await new OdsRepository().extract(path);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    // Without counting the covered cell, "tail" would slide under the H2 column.
+    expect(result.data.parts.join("\n")).toContain("| wide |  | tail |");
+  });
+
+  it("reports empty for a spreadsheet without cell content", async () => {
+    const path = await odsFixture(
+      "blank.ods",
+      `<office:document><office:body><office:spreadsheet>
+         <table:table table:name="S"><table:table-row><table:table-cell/></table:table-row></table:table>
+       </office:spreadsheet></office:body></office:document>`,
+    );
+    const result = await new OdsRepository().extract(path);
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.cause).toBe("empty");
+  });
+});
+
+describe("OdpRepository", () => {
+  it("keeps slide boundaries", async () => {
+    const path = await odsFixture(
+      "deck.odp",
+      `<office:document><office:body><office:presentation>
+         <draw:page draw:name="page1"><draw:frame><draw:text-box><text:p>First slide</text:p></draw:text-box></draw:frame></draw:page>
+         <draw:page draw:name="page2"><draw:frame><draw:text-box><text:p>Second slide</text:p></draw:text-box></draw:frame></draw:page>
+       </office:presentation></office:body></office:document>`,
+    );
+    const result = await new OdpRepository().extract(path);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.sourceFormat).toBe("odp");
+    const text = result.data.parts.join("\n");
+    expect(text).toContain("## Slide 1");
+    expect(text).toContain("First slide");
+    expect(text).toContain("## Slide 2");
+    expect(text).toContain("Second slide");
+    expect(text.indexOf("First slide")).toBeLessThan(text.indexOf("## Slide 2"));
+  });
+
+  it("reports empty for a deck with no text", async () => {
+    const path = await odsFixture(
+      "empty.odp",
+      `<office:document><office:body><office:presentation>
+         <draw:page draw:name="page1"><draw:frame/></draw:page>
+       </office:presentation></office:body></office:document>`,
+    );
+    const result = await new OdpRepository().extract(path);
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.cause).toBe("empty");
   });
 });
 
@@ -171,8 +306,8 @@ describe("EpubRepository", () => {
     const result = await new EpubRepository().extract(path);
     expect(result.success).toBe(true);
     if (!result.success) return;
-    expect(result.data.text).toContain("Chapter one");
-    expect(result.data.text).toContain("Chapter two");
+    expect(result.data.parts.join("\n")).toContain("Chapter one");
+    expect(result.data.parts.join("\n")).toContain("Chapter two");
   });
 
   it("follows the OPF spine order, not filename order", async () => {
@@ -193,7 +328,7 @@ describe("EpubRepository", () => {
     const result = await new EpubRepository().extract(path);
     expect(result.success).toBe(true);
     if (!result.success) return;
-    expect(result.data.text.indexOf("Chapter two")).toBeLessThan(result.data.text.indexOf("Chapter one"));
+    expect(result.data.parts.join("\n").indexOf("Chapter two")).toBeLessThan(result.data.parts.join("\n").indexOf("Chapter one"));
   });
 
   it("falls back to filename order (with a warning) when there is no OPF", async () => {
@@ -207,7 +342,7 @@ describe("EpubRepository", () => {
     expect(result.success).toBe(true);
     if (!result.success) return;
     expect(result.data.warnings.some((w) => w.includes("filename order"))).toBe(true);
-    expect(result.data.text.indexOf("Ay")).toBeLessThan(result.data.text.indexOf("Bee"));
+    expect(result.data.parts.join("\n").indexOf("Ay")).toBeLessThan(result.data.parts.join("\n").indexOf("Bee"));
   });
 });
 
@@ -225,7 +360,7 @@ describe("PdfRepository", () => {
     expect(result.success).toBe(true);
     if (!result.success) return;
     expect(result.data.sourceFormat).toBe("pdf");
-    expect(result.data.text).toContain("Hello PDF World");
+    expect(result.data.parts.join("\n")).toContain("Hello PDF World");
   });
 
   it("reports empty when the PDF has no text operators", async () => {
@@ -252,15 +387,15 @@ describe("RtfRepository", () => {
     expect(result.success).toBe(true);
     if (!result.success) return;
     expect(result.data.sourceFormat).toBe("rtf");
-    expect(result.data.text).toContain("Hello");
-    expect(result.data.text).toContain("RTF");
-    expect(result.data.text).toContain("World");
-    expect(result.data.text).toContain("Plain");
-    expect(result.data.text).toContain("text \\ with { braces }");
+    expect(result.data.parts.join("\n")).toContain("Hello");
+    expect(result.data.parts.join("\n")).toContain("RTF");
+    expect(result.data.parts.join("\n")).toContain("World");
+    expect(result.data.parts.join("\n")).toContain("Plain");
+    expect(result.data.parts.join("\n")).toContain("text \\ with { braces }");
     // Destinations (fonttbl/colortbl/info) must not leak their control words.
-    expect(result.data.text).not.toContain("fonttbl");
-    expect(result.data.text).not.toContain("Helvetica");
-    expect(result.data.text).not.toContain("Jane Doe");
+    expect(result.data.parts.join("\n")).not.toContain("fonttbl");
+    expect(result.data.parts.join("\n")).not.toContain("Helvetica");
+    expect(result.data.parts.join("\n")).not.toContain("Jane Doe");
   });
 
   it("reports empty for an RTF with no visible text", async () => {

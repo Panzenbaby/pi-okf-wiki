@@ -12,8 +12,13 @@ import type { Result } from "../types.ts";
  * document. Returned by every `DocumentExtractorRepository`.
  */
 export interface ExtractedText {
-  /** Plain, readable text suitable for the agent's `read` tool. */
-  readonly text: string;
+  /**
+   * Plain, readable text suitable for the agent's `read` tool, in one or more
+   * parts. Most formats yield a single part; a repository splits into several
+   * only when one file would be too large to read in one go (JSONL). Parts are
+   * ordered and are staged as separate files by the extraction service.
+   */
+  readonly parts: readonly string[];
   /** Source format id (e.g. "pdf", "docx", "xlsx", "pptx", "odt", "epub", "html"). */
   readonly sourceFormat: string;
   /** Non-fatal warnings (e.g. skipped sheets, embedded images ignored). */

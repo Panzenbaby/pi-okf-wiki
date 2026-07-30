@@ -35,7 +35,7 @@ export class HtmlRepository implements DocumentExtractorRepository {
       if (text.length === 0) {
         return extractionFailure("empty", "HTML yielded no text.", absolutePath);
       }
-      return ok<ExtractedText>({ text, sourceFormat: this.sourceFormat, warnings: [] });
+      return ok<ExtractedText>({ parts: [text], sourceFormat: this.sourceFormat, warnings: [] });
     } catch (error) {
       return extractionFailure("extraction_failed", `HTML extraction failed: ${message(error)}`, absolutePath);
     }

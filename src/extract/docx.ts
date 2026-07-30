@@ -35,7 +35,7 @@ export class DocxRepository implements DocumentExtractorRepository {
       const warnings = dto.messages
         .filter((entry) => entry.type === "warning")
         .map((entry) => entry.message);
-      return ok<ExtractedText>({ text, sourceFormat: this.sourceFormat, warnings });
+      return ok<ExtractedText>({ parts: [text], sourceFormat: this.sourceFormat, warnings });
     } catch (error) {
       return extractionFailure("extraction_failed", `DOCX extraction failed: ${message(error)}`, absolutePath);
     }

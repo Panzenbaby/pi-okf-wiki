@@ -53,12 +53,33 @@ describe("extractToTempFile", () => {
     expect(result.success).toBe(true);
     if (!result.success) return;
     expect(result.data.sourceFormat).toBe("html");
-    expect(result.data.tempRelativeName).toBe("notes/foo-extracted.txt");
-    expect(result.data.extractedTextPath).toBe(join(inputRoot, ".okf-extract", "notes/foo-extracted.txt"));
-    expect(await pathExists(result.data.extractedTextPath)).toBe(true);
+    expect(result.data.tempRelativeNames).toEqual(["notes/foo-extracted.txt"]);
+    const [textPath = ""] = result.data.extractedTextPaths;
+    expect(textPath).toBe(join(inputRoot, ".okf-extract", "notes/foo-extracted.txt"));
+    expect(await pathExists(textPath)).toBe(true);
     const { readFile } = await import("node:fs/promises");
-    const written = await readFile(result.data.extractedTextPath, "utf8");
+    const written = await readFile(textPath, "utf8");
     expect(written).toContain("Hello extracted");
+  });
+
+  it("stages one numbered file per part when the extractor splits a source", async () => {
+    const lines: string[] = [];
+    for (let index = 1; index <= 2100; index++) lines.push(`{"n":${index}}`);
+    const absolute = join(inputRoot, "logs/events.jsonl");
+    await mkdir(join(absolute, ".."), { recursive: true });
+    await writeFile(absolute, `${lines.join("\n")}\n`);
+
+    const result = await extractToTempFile(inputRoot, "logs/events.jsonl", absolute);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.tempRelativeNames).toEqual([
+      "logs/events-extracted.part01.txt",
+      "logs/events-extracted.part02.txt",
+      "logs/events-extracted.part03.txt",
+    ]);
+    for (const path of result.data.extractedTextPaths) {
+      expect(await pathExists(path)).toBe(true);
+    }
   });
 
   it("disambiguates same-stem-different-extension files in the same directory", async () => {
@@ -69,10 +90,11 @@ describe("extractToTempFile", () => {
     expect(first.success).toBe(true);
     expect(second.success).toBe(true);
     if (!first.success || !second.success) return;
-    expect(first.data.tempRelativeName).toBe("dir/foo-extracted.txt");
-    expect(second.data.tempRelativeName).toBe("dir/foo.odt-extracted.txt");
-    expect(await pathExists(join(inputRoot, ".okf-extract", first.data.tempRelativeName))).toBe(true);
-    expect(await pathExists(join(inputRoot, ".okf-extract", second.data.tempRelativeName))).toBe(true);
+    expect(first.data.tempRelativeNames).toEqual(["dir/foo-extracted.txt"]);
+    expect(second.data.tempRelativeNames).toEqual(["dir/foo.odt-extracted.txt"]);
+    for (const name of [...first.data.tempRelativeNames, ...second.data.tempRelativeNames]) {
+      expect(await pathExists(join(inputRoot, ".okf-extract", name))).toBe(true);
+    }
   });
 
   it("propagates extraction failures with a stable cause", async () => {
@@ -99,7 +121,7 @@ describe("extraction temp lifecycle", () => {
     const archiveResult = await archiveExtractedText(
       inputRoot,
       archiveDir,
-      extracted.data.tempRelativeName,
+      extracted.data.tempRelativeNames,
       resolveArchiveTarget,
     );
     expect(archiveResult.success).toBe(true);

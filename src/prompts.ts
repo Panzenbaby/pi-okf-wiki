@@ -60,8 +60,11 @@ export interface UpdatePromptInput {
     absolutePath: string;
     /** Precomputed, collision-free archive destination for the ORIGINAL file. */
     archiveTarget: string;
-    /** When set, the agent reads this extracted `.txt` instead of the binary original. */
-    extractedTextPath?: string;
+    /**
+     * When set, the agent reads these extracted `.txt` files instead of the
+     * original. Several entries mean ONE source was split into ordered parts.
+     */
+    extractedTextPaths?: readonly string[];
     /** Source format id when extracted (e.g. "docx"). */
     sourceFormat?: string;
   }>;
@@ -73,8 +76,13 @@ export interface UpdatePromptInput {
 export function buildUpdatePrompt(input: UpdatePromptInput): string {
   const fileList = input.inputFiles
     .map((file) => {
-      if (file.extractedTextPath !== undefined) {
-        return `- input/${file.relativePath} (source format: ${file.sourceFormat ?? "unknown"}; READ extracted text: ${file.extractedTextPath}) -> archive ORIGINAL to: ${file.archiveTarget}`;
+      const extracted = file.extractedTextPaths ?? [];
+      const format = file.sourceFormat ?? "unknown";
+      if (extracted.length > 1) {
+        return `- input/${file.relativePath} (source format: ${format}; ONE source split into ${extracted.length} ordered parts — READ ALL of them: ${extracted.join(", ")}) -> archive ORIGINAL to: ${file.archiveTarget}`;
+      }
+      if (extracted.length === 1) {
+        return `- input/${file.relativePath} (source format: ${format}; READ extracted text: ${extracted[0]}) -> archive ORIGINAL to: ${file.archiveTarget}`;
       }
       return `- input/${file.relativePath} (READ directly: ${file.absolutePath}) -> archive to: ${file.archiveTarget}`;
     })
@@ -102,11 +110,14 @@ The following input files are NOT yet OKF-conformant.
 
 STEP 0 — Cluster inputs by the entity they describe (BEFORE assigning concept IDs):
 - Read every input file first. For binary/structured formats (pdf, docx, xlsx,
-  pptx, odt, epub, html, rtf) an extracted plain-text file has already been
-  written for you — READ THE EXTRACTED TEXT path listed for that input, NOT the
-  binary original. For plain text (.txt, .csv, .json), markdown, and images,
-  read the original file directly with the read tool (images are read via
-  vision).
+  pptx, odt, ods, odp, epub, html, rtf, jsonl, ipynb) an extracted plain-text
+  file has already been written for you — READ THE EXTRACTED TEXT path listed
+  for that input, NOT the original. When an input lists SEVERAL extracted parts,
+  they are consecutive slices of ONE source file: read them all and treat them
+  as a single document, never as separate sources. For plain text (.txt, .csv,
+  .tsv, .json, .yaml, .toml, diagram DSLs, .rst/.adoc/.org), markdown, and
+  images, read the original file directly with the read tool (images are read
+  via vision).
 - Group files that describe the SAME real-world entity. Match on the asserted
   name (e.g. "ALG-32"), canonical resource, or distinctive keywords — NOT on the
   input filename. Files named like foo-2.txt / foo-3.txt are usually VERSIONS of

@@ -48,6 +48,49 @@ function pathsOf(files: readonly InputFile[]): string[] {
 }
 
 describe("InputClassifier", () => {
+  it("imports a conformant .markdown as a .md concept", async () => {
+    const file = await writeInput(
+      "notes/aliased.markdown",
+      "---\ntype: note\ntitle: Aliased\n---\nbody\n",
+    );
+    await cleanExtractionTemp(inputRoot);
+
+    const result = await createClassifier(wikiPaths(workdir)).classify([file]);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+
+    // The wiki only ever loads `.md`, so a `.markdown` concept written verbatim
+    // would sit in wiki/ unloadable and unindexed.
+    expect(result.data.conformantImported).toEqual(["notes/aliased"]);
+    const { readFile } = await import("node:fs/promises");
+    expect(await readFile(join(wikiRoot, "notes/aliased.md"), "utf8")).toContain("type: note");
+    await expect(readFile(join(wikiRoot, "notes/aliased.markdown"), "utf8")).rejects.toThrow();
+    expect(result.data.forAgent).toHaveLength(0);
+    expect(result.data.ignored).toHaveLength(0);
+  });
+
+  it("treats index.markdown as reserved, like index.md", async () => {
+    const file = await writeInput("index.markdown", "---\ntype: index\n---\nreserved\n");
+    await cleanExtractionTemp(inputRoot);
+
+    const result = await createClassifier(wikiPaths(workdir)).classify([file]);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.ignored).toEqual([{ path: "index.markdown", reason: "reserved" }]);
+    expect(result.data.conformantImported).toHaveLength(0);
+  });
+
+  it("defers a .markdown without frontmatter to the agent instead of ignoring it", async () => {
+    const file = await writeInput("loose.markdown", "# just a heading");
+    await cleanExtractionTemp(inputRoot);
+
+    const result = await createClassifier(wikiPaths(workdir)).classify([file]);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(pathsOf(result.data.forAgent)).toEqual(["loose.markdown"]);
+    expect(result.data.ignored).toHaveLength(0);
+  });
+
   it("sorts conformant, deferred, text-readable, and ignored files into the three buckets", async () => {
     const conformantMd = await writeInput(
       "notes/conformant.md",
@@ -91,13 +134,13 @@ describe("InputClassifier", () => {
 
     // forAgent order: non-md (txt, html) first, then deferred .md.
     expect(pathsOf(forAgent)).toEqual(["plain.txt", "page.html", "deferred.md"]);
-    // The extractable html file gets an extractedTextPath staged.
+    // The extractable html file gets its extracted text staged.
     const htmlEntry = forAgent.find((file) => file.relativePath === "page.html");
-    expect(htmlEntry?.extractedTextPath).toBeTruthy();
+    expect(htmlEntry?.extractedTextPaths).toHaveLength(1);
     expect(htmlEntry?.sourceFormat).toBe("html");
-    // Text-readable file has no extractedTextPath.
+    // Text-readable file is read directly, so nothing is staged for it.
     const txtEntry = forAgent.find((file) => file.relativePath === "plain.txt");
-    expect(txtEntry?.extractedTextPath).toBeUndefined();
+    expect(txtEntry?.extractedTextPaths).toBeUndefined();
 
     // ignored order: reserved/unsupported first, then extraction failures.
     expect(ignored.map((entry) => ({ path: entry.path, reason: entry.reason }))).toEqual([

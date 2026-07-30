@@ -103,13 +103,15 @@ class InputClassifier implements Classifier {
     const nonConformantCandidates: InputFile[] = [];
     const tentativelyIgnored: IgnoredEntry[] = [];
     for (const file of files) {
-      const name = basename(file.relativePath);
+      // Match the reserved check against the normalised name, so `index.markdown`
+      // cannot slip past it and clobber the generated wiki index.
+      const name = basename(asMarkdownPath(file.relativePath));
       if (RESERVED_INPUT.has(name)) {
         tentativelyIgnored.push({ path: file.relativePath, reason: "reserved" });
         continue;
       }
       const lower = file.relativePath.toLowerCase();
-      if (lower.endsWith(".md")) {
+      if (isMarkdown(lower)) {
         // Conformance is confirmed in pass 3 by parsing frontmatter.
         conformantCandidates.push({ ...file, classification: "conformant" });
         continue;
@@ -147,8 +149,8 @@ class InputClassifier implements Classifier {
         const artifact: ExtractedArtifact = result.data;
         forAgentFromExtraction.push({
           ...file,
-          extractedTextPath: artifact.extractedTextPath,
-          tempRelativeName: artifact.tempRelativeName,
+          extractedTextPaths: artifact.extractedTextPaths,
+          tempRelativeNames: artifact.tempRelativeNames,
           sourceFormat: artifact.sourceFormat,
         });
       } else {
@@ -228,7 +230,8 @@ async function importConformant(
       cause: "non-conformant",
     });
   }
-  const targetPath = `${paths.wiki}/${file.relativePath}`;
+  const conceptPath = asMarkdownPath(file.relativePath);
+  const targetPath = `${paths.wiki}/${conceptPath}`;
   const writeResult = await writeTextFile(targetPath, content.data);
   if (!writeResult.success) {
     return err<string>(writeResult.error.message, {
@@ -244,7 +247,22 @@ async function importConformant(
       cause: "io_failed",
     });
   }
-  return ok(conceptIdFromRelativePath(file.relativePath));
+  return ok(conceptIdFromRelativePath(conceptPath));
+}
+
+function isMarkdown(lowerPath: string): boolean {
+  return lowerPath.endsWith(".md") || lowerPath.endsWith(".markdown");
+}
+
+/**
+ * Normalise a conformant input path to the `.md` the wiki expects. A concept
+ * written as `<name>.markdown` would fail `isConceptFile`, so it would sit in
+ * `wiki/` without ever being loaded, indexed, or retrievable.
+ */
+function asMarkdownPath(relativePath: string): string {
+  return relativePath.toLowerCase().endsWith(".markdown")
+    ? `${relativePath.slice(0, -".markdown".length)}.md`
+    : relativePath;
 }
 
 /** True iff `lowerPath` (already lowercased) ends with any of `extensions`. */

@@ -77,12 +77,13 @@ export interface InputFile {
   /** Human-readable detail for an ignored file (e.g. the underlying lib error). */
   readonly ignoreDetail?: string;
   /**
-   * Absolute path to a temp extracted `.txt` the agent should read INSTEAD of
-   * `absolutePath`. Set only for binary formats that were successfully extracted.
+   * Absolute paths to the temp extracted `.txt` files the agent should read
+   * INSTEAD of `absolutePath`. Set only for formats that were successfully
+   * extracted. Usually one; several when the extractor split a large file.
    */
-  readonly extractedTextPath?: string;
-  /** Path of the extracted text relative to `.okf-extract/` (e.g. `notes/foo-extracted.txt`). */
-  readonly tempRelativeName?: string;
+  readonly extractedTextPaths?: readonly string[];
+  /** Paths of the extracted text relative to `.okf-extract/` (e.g. `notes/foo-extracted.txt`). */
+  readonly tempRelativeNames?: readonly string[];
   /** Source format id when extracted (e.g. "docx"). */
   readonly sourceFormat?: string;
 }
