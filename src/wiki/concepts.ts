@@ -75,9 +75,19 @@ export async function snapshotWiki(
   return ok({ entries });
 }
 
+/** One concept moved to the trash, with the bundle-relative path it landed at. */
+export interface ConceptRemoval {
+  readonly conceptId: string;
+  /** e.g. `/trash/project/foo.md.orig` — the link target used in `log.md`. */
+  readonly trashPath: string;
+}
+
 export interface WikiDiff {
   readonly created: readonly string[];
   readonly updated: readonly string[];
+  /** Set by `/wiki-remove`; absent for the snapshot diff of `/wiki-update`,
+   *  which cannot know where a vanished concept went. */
+  readonly removed?: readonly ConceptRemoval[];
 }
 
 export function diffSnapshots(before: WikiSnapshot, after: WikiSnapshot): WikiDiff {

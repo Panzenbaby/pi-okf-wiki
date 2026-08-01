@@ -14,17 +14,24 @@ the concepts that back it.
 | --- | --- |
 | `/wiki-update` | Ingest new documents from `input/` into the `wiki/` bundle, archive the originals, regenerate `index.md` / `log.md`, and show a summary. |
 | `/wiki-query <question>` | Answer a question against the wiki, with every claim cited to a `wiki/<concept-id>.md` source. |
+| `/wiki-remove <path>` | Move a concept (or a whole directory of concepts) into `wiki/trash/`, redirect links that pointed at it, and regenerate `index.md` / `log.md`. |
 
 ## Folder layout
 
-The extension operates on three folders at the project root (`ctx.cwd`):
+The extension operates on two folders at the project root (`ctx.cwd`):
 
 ```
 .
-├── input/     # drop new material here
-├── archive/   # originals land here after their concept exists in wiki/
-└── wiki/      # the OKF knowledge bundle (concepts + index.md + log.md)
+├── input/          # drop new material here
+└── wiki/           # the OKF knowledge bundle (concepts + index.md + log.md)
+    ├── archive/    # originals land here after their concept exists in wiki/
+    └── trash/      # concepts land here when they are removed from the wiki
 ```
+
+Both `archive/` and `trash/` live *inside* the bundle so that links into them
+are bundle-relative, which is an OKF §8-sanctioned citation form. Neither is
+indexed, and `.md` files in them carry an outermost `.orig` suffix so they are
+not concept documents per §3.1 and the bundle stays conformant (§9.1).
 
 Missing folders are created on the first `/wiki-update`.
 
@@ -298,12 +305,13 @@ leaks outside its repository.
 | `src/frontmatter.ts` | Minimal YAML frontmatter parser for the OKF subset. |
 | `src/files.ts` | Filesystem helpers, all returning `Result<T>` (incl. `copyFile`, `removeDir`). |
 | `src/wiki.ts` | Barrel re-exporting the `wiki/` modules so the `./wiki.ts` import surface stays stable for `update.ts`, `query.ts`, `classifier.ts`, and `prompts.ts`. |
-| `src/wiki/paths.ts` | `wikiPaths`, `conceptIdFromRelativePath`, `isConceptFile`, `relativePosix`, `WikiPaths`. |
+| `src/wiki/paths.ts` | `wikiPaths`, `conceptIdFromRelativePath`, `isConceptFile`, `relativePosix`, `ARCHIVE_DIR`, `TRASH_DIR`, `WikiPaths`. |
 | `src/wiki/concepts.ts` | Concept loading (`loadConcept`, `loadAllConcepts`), snapshot/diff (`snapshotWiki`, `diffSnapshots`, `WikiDiff`). |
 | `src/wiki/index-log.ts` | `index.md` / `log.md` generation (`generateIndexMd`, `writeIndexMd`, `appendLogMd`, `buildLogEntry`). |
 | `src/wiki/retrieval.ts` | Structure preview and TF-IDF cosine retrieval. The `Retriever` interface is the seam injected into `/wiki-query`; `TermFrequencyRetriever` is the default implementation (it replaces the former `retrieveConcepts` free function, which is kept as a thin wrapper). IDF is computed on the fly from the loaded concepts so common terms are downweighted in any language — no hardcoded stopword list. Also exports: `tokenize`, `renderConceptForPrompt`, `renderWikiTree`, `displayTitle`, `buildStructurePreview`. |
 | `src/prompts.ts` | Agent prompt builders for ingestion and query. |
-| `src/links.ts` | Pure `compileArchiveRewriter` / `rewriteArchiveCitationLinks` — rewrites `/archive/<input-relative-path>` placeholder citation links in a concept BODY (frontmatter untouched) to the actual (post-rename) archive path. |
+| `src/links.ts` | Pure link rewriters (no IO). `compileArchiveRewriter` / `rewriteArchiveCitationLinks` rewrite `/archive/<input-relative-path>` placeholder citation links in a concept BODY (frontmatter untouched) to the actual (post-rename) archive path. `compileRemovedConceptRewriter` / `conceptIdFromLinkTarget` resolve any spelling of a concept link (root-relative, `wiki/`-prefixed, or relative to the citing file) to a conceptId and redirect removed ones to their `/trash/` path. |
+| `src/remove.ts` | `/wiki-remove` logic: `planRemoval` (what would be affected, incl. incoming links — no mutation) and `removeFromWiki` (move to trash, redirect links, regenerate `index.md`, append the `Removal` log entry, collapse emptied directories). Deterministic, no agent turn. |
 | `src/update.ts` | `/wiki-update` command logic and the `IntakeSession` (finalize) that owns the agent-handoff state, including the post-agent citation-link rewrite (`rewriteArchiveCitationsInConcepts`). |
 | `src/classifier.ts` | `InputClassifier` that owns the full input→bucket pipeline AND the deterministic conformant intake: tentative dispatch by extension, the extraction pass (staging extracted text), and pass 3 — read + verify frontmatter + write to `wiki/` + archive original — for conformant `.md` files. Emits the three final buckets (`conformantImported` / `forAgent` / `ignored`) once, in input order. |
 | `src/query.ts` | `/wiki-query` command logic and the `QuerySession` that owns the pending question. Both `buildWikiQueryContext` and `runQuery` take an optional `Retriever` (default `TermFrequencyRetriever`) so the scoring strategy is injectable. |

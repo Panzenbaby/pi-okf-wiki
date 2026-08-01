@@ -96,6 +96,140 @@ export function rewriteArchiveCitationLinks(
   return compileArchiveRewriter(mapping).rewrite(content);
 }
 
+/** A compiled rewriter that redirects links pointing at removed concepts. */
+export interface RemovedConceptRewriter {
+  readonly hasMappings: boolean;
+  /**
+   * Rewrite links to removed concepts in the BODY of the concept stored at
+   * `sourceDir` (its bundle-relative directory, `""` for the bundle root).
+   * `sourceDir` is needed because a link target may be relative to the file
+   * that contains it.
+   */
+  rewrite(content: string, sourceDir: string): { content: string; changed: boolean };
+}
+
+/** Markdown link destination: the `(...)` of `[label](...)`, angle form included. */
+const LINK_TARGET_RE = /\]\(\s*(<[^>]*>|[^()\s]*)\s*\)/g;
+
+/**
+ * Compile a rewriter for `mapping` (conceptId -> bundle-relative trash path,
+ * e.g. `project/foo` -> `/trash/project/foo.md.orig`).
+ *
+ * Only the BODY is rewritten; frontmatter stays byte-for-byte untouched, for
+ * the same reason as {@link compileArchiveRewriter} — `resource:` holds a
+ * canonical URI per OKF §4.1, and silently rewriting it would paper over a
+ * misuse rather than surface it.
+ *
+ * Targets are matched by resolving each link destination to a conceptId, so
+ * every spelling of the same concept is caught: root-relative
+ * (`/project/foo.md`), bundle-prefixed (`wiki/project/foo.md`), and relative
+ * to the containing file (`../project/foo.md`). Rewritten links are always
+ * emitted root-relative, which is the dominant form in generated wikis and
+ * stays valid regardless of where the citing concept later moves.
+ */
+export function compileRemovedConceptRewriter(
+  mapping: ReadonlyMap<string, string>,
+): RemovedConceptRewriter {
+  if (mapping.size === 0) {
+    return { hasMappings: false, rewrite: (c) => ({ content: c, changed: false }) };
+  }
+  const rewriteBody = (
+    body: string,
+    sourceDir: string,
+  ): { content: string; changed: boolean } => {
+    let changed = false;
+    const out = body.replace(LINK_TARGET_RE, (match, rawTarget: string) => {
+      const conceptId = conceptIdFromLinkTarget(rawTarget, sourceDir);
+      if (conceptId === null) return match;
+      const trashPath = mapping.get(conceptId);
+      if (trashPath === undefined) return match;
+      changed = true;
+      return `](${encodeLinkTarget(trashPath)})`;
+    });
+    return { content: out, changed };
+  };
+
+  return {
+    hasMappings: true,
+    rewrite(content: string, sourceDir: string) {
+      const { frontmatter, body } = splitFrontmatter(content);
+      const result = rewriteBody(body, sourceDir);
+      if (!result.changed) return { content, changed: false };
+      return { content: frontmatter + result.content, changed: true };
+    },
+  };
+}
+
+/**
+ * Resolve a markdown link destination to the conceptId it points at, or null
+ * when it does not address a concept in this bundle (external URL, non-`.md`
+ * target, or a path escaping the bundle root).
+ *
+ * `sourceDir` is the bundle-relative directory of the file containing the
+ * link (`""` for the bundle root).
+ */
+export function conceptIdFromLinkTarget(
+  rawTarget: string,
+  sourceDir: string,
+): string | null {
+  let target = rawTarget.trim();
+  if (target.startsWith("<") && target.endsWith(">")) target = target.slice(1, -1).trim();
+  if (target === "") return null;
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(target)) return null; // http:, mailto:, file:, …
+  // A writer may percent-encode characters the file name contains literally
+  // (`My%20Doc.md`). Concept ids use the real file name, so decode first or
+  // the link would silently miss its target.
+  target = decodePath(target);
+  // Anchors/queries address a location INSIDE the target file; the file
+  // identity is all that matters here, so they are dropped.
+  target = target.split("#")[0]!.split("?")[0]!;
+  if (!target.endsWith(".md")) return null;
+
+  const isRootRelative = target.startsWith("/");
+  const normalized = normalizePosix(
+    isRootRelative ? target.slice(1) : joinPosix(sourceDir, target),
+  );
+  if (normalized === null) return null; // escaped the bundle root
+  let path = normalized;
+  // A root-relative link may address the bundle from outside it (`/wiki/x.md`).
+  if (path.startsWith("wiki/")) path = path.slice("wiki/".length);
+  if (!path.endsWith(".md")) return null;
+  return path.slice(0, -3);
+}
+
+function joinPosix(dir: string, path: string): string {
+  return dir === "" ? path : `${dir}/${path}`;
+}
+
+/** Percent-decode a link target; malformed sequences are left as written. */
+function decodePath(path: string): string {
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    return path;
+  }
+}
+
+/** A target containing spaces or parens only parses inside angle brackets. */
+function encodeLinkTarget(path: string): string {
+  return /[\s()]/.test(path) ? `<${path}>` : path;
+}
+
+/** Collapse `.` / `..` segments. Returns null if the path escapes the root. */
+function normalizePosix(path: string): string | null {
+  const out: string[] = [];
+  for (const segment of path.split("/")) {
+    if (segment === "" || segment === ".") continue;
+    if (segment !== "..") {
+      out.push(segment);
+      continue;
+    }
+    if (out.length === 0) return null;
+    out.pop();
+  }
+  return out.join("/");
+}
+
 /**
  * Split a concept file's content into its frontmatter (verbatim, including
  * both `---` fences and the trailing newline) and body. If the content has no

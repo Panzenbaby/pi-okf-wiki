@@ -7,8 +7,15 @@ export interface WikiPaths {
   readonly root: string; // ctx.cwd
   readonly input: string;
   readonly archive: string;
+  readonly trash: string;
   readonly wiki: string;
 }
+
+/** Bundle-relative name of the archive directory (ingest originals). */
+export const ARCHIVE_DIR = "archive";
+
+/** Bundle-relative name of the trash directory (removed concepts). */
+export const TRASH_DIR = "trash";
 
 export function wikiPaths(cwd: string): WikiPaths {
   return {
@@ -28,7 +35,17 @@ export function wikiPaths(cwd: string): WikiPaths {
     // documents per OKF §3.1 and the bundle stays conformant (§9.1) without
     // requiring frontmatter on archived originals. `archive/` is excluded
     // from index.md generation (see src/wiki/index-log.ts).
-    archive: join(cwd, "wiki", "archive"),
+    archive: join(cwd, "wiki", ARCHIVE_DIR),
+    // The trash lives inside the bundle for the same reason as the archive:
+    // links in surviving concepts are rewritten to `/trash/<rel>`, which is a
+    // bundle-relative path and therefore an OKF §8-sanctioned citation form.
+    // A sibling `trash/` outside `wiki/` would force those links into a
+    // non-sanctioned repo-relative form. Removed `.md` concepts are stored
+    // with an outermost `.orig` suffix (see `resolveArchiveTarget` in
+    // files.ts) so they stop being concept documents per OKF §3.1 and the
+    // bundle stays conformant (§9.1) — which is also what keeps them out of
+    // `/wiki-query` retrieval and out of `index.md` generation.
+    trash: join(cwd, "wiki", TRASH_DIR),
     wiki: join(cwd, "wiki"),
   };
 }

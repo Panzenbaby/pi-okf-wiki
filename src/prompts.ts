@@ -251,6 +251,13 @@ Conflict & completeness rules (IMPORTANT):
 - If you find a contradiction while exploring, make it explicit in the answer
   and cite both sides.
 
+Removed knowledge (IMPORTANT):
+- Files under \`/trash/\` are knowledge that was REMOVED from the wiki. Never
+  open them and never use them as evidence — they are not part of the answer.
+- When a link you would follow points into \`/trash/\`, treat it as a dead end
+  and say that the referenced source was removed from the wiki. Do not
+  reconstruct its content from the link text or from memory.
+
 ## Wiki tree
 ${input.wikiTree}
 

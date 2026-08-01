@@ -3,11 +3,13 @@
 // Commands:
 //   /wiki-update — ingest new documents from input/ into the wiki/ bundle.
 //   /wiki-query  — answer a question against the wiki with source citations.
+//   /wiki-remove — move a concept or a whole directory into the bundle trash.
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { runUpdate, intakeSessionRegistry } from "./update.ts";
 import { runQuery, querySessionRegistry, buildWikiQueryContext } from "./query.ts";
+import { removeFromWiki } from "./remove.ts";
 
 export default function okfExtension(pi: ExtensionAPI): void {
   // After any agent turn, finalize a pending /wiki-update run (if any) so the
@@ -54,6 +56,31 @@ export default function okfExtension(pi: ExtensionAPI): void {
       if (!result.success) {
         ctx.ui.notify(`/wiki-query failed: ${result.error.message}`, "error");
       }
+    },
+  });
+
+  pi.registerCommand("wiki-remove", {
+    description: "Move a concept or directory out of the wiki into wiki/trash/",
+    handler: async (args, ctx) => {
+      const target = args.trim();
+      if (target === "") {
+        ctx.ui.notify("Usage: /wiki-remove <concept-path | directory>", "warning");
+        return;
+      }
+      const result = await removeFromWiki(ctx.cwd, target);
+      if (!result.success) {
+        ctx.ui.notify(`/wiki-remove failed: ${result.error.message}`, "error");
+        return;
+      }
+      const { removed, removedDirectories, rewrittenConcepts } = result.data;
+      const parts = [`Removed ${removed.length} concept(s) to wiki/trash/`];
+      if (removedDirectories.length > 0) {
+        parts.push(`emptied directories: ${removedDirectories.join(", ")}`);
+      }
+      if (rewrittenConcepts.length > 0) {
+        parts.push(`redirected links in ${rewrittenConcepts.length} concept(s)`);
+      }
+      ctx.ui.notify(parts.join(" — "), "info");
     },
   });
 }

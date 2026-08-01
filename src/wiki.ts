@@ -8,6 +8,8 @@ export {
   conceptIdFromRelativePath,
   isConceptFile,
   relativePosix,
+  ARCHIVE_DIR,
+  TRASH_DIR,
   type WikiPaths,
 } from "./wiki/paths.ts";
 
@@ -16,6 +18,7 @@ export {
   loadAllConcepts,
   snapshotWiki,
   diffSnapshots,
+  type ConceptRemoval,
   type WikiDiff,
 } from "./wiki/concepts.ts";
 

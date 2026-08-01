@@ -16,13 +16,14 @@
 import { join } from "node:path";
 import { ok, type Concept, type Result } from "../types.ts";
 import { listFiles, readTextFile, removeFile, writeTextFile } from "../files.ts";
+import { ARCHIVE_DIR, TRASH_DIR } from "./paths.ts";
 import type { WikiDiff } from "./concepts.ts";
 
 /** OKF spec version this bundle targets (§11). Declared in root `index.md` frontmatter. */
 export const OKF_VERSION = "0.1";
 
-/** The `archive/` directory inside the bundle — never indexed. */
-const ARCHIVE_DIR = "archive";
+/** Bundle directories that hold raw files, not knowledge — never indexed. */
+const UNINDEXED_DIRS: readonly string[] = [ARCHIVE_DIR, TRASH_DIR];
 
 /**
  * Compute every directory that should get an `index.md`: the root plus every
@@ -35,7 +36,7 @@ export function computeIndexDirs(concepts: readonly Concept[]): Set<string> {
   dirs.add(""); // root always
   for (const concept of concepts) {
     let cur = dirOf(concept.conceptId);
-    if (isArchivePath(cur)) continue;
+    if (isUnindexedPath(cur)) continue;
     while (true) {
       dirs.add(cur);
       if (cur === "") break;
@@ -65,8 +66,8 @@ function basename(dir: string): string {
   return idx === -1 ? dir : dir.slice(idx + 1);
 }
 
-function isArchivePath(p: string): boolean {
-  return p === ARCHIVE_DIR || p.startsWith(`${ARCHIVE_DIR}/`);
+function isUnindexedPath(p: string): boolean {
+  return UNINDEXED_DIRS.some((dir) => p === dir || p.startsWith(`${dir}/`));
 }
 
 /** Immediate child directories (one level deeper) of `dir`, sorted. */
@@ -218,7 +219,14 @@ function buildLogEntry(date: string, diff: WikiDiff): string {
   for (const conceptId of diff.updated) {
     lines.push(`* **Update**: Updated [${conceptId}](/${conceptId}.md).`);
   }
-  if (diff.created.length === 0 && diff.updated.length === 0) {
+  // The link points into the trash, not at the (now gone) concept path, so the
+  // log stays clickable. Earlier Creation/Update entries are left alone — they
+  // record what was true at the time.
+  for (const removal of diff.removed ?? []) {
+    lines.push(`* **Removal**: Removed [${removal.conceptId}](${removal.trashPath}).`);
+  }
+  const removedCount = diff.removed?.length ?? 0;
+  if (diff.created.length === 0 && diff.updated.length === 0 && removedCount === 0) {
     lines.push("* **No-op**: No concepts changed.");
   }
   lines.push("");
