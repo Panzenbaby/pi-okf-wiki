@@ -147,6 +147,27 @@ describe("removeFromWiki", () => {
     expect(log).toContain("* **Removal**: Removed [project/foo](/trash/project/foo.md.orig).");
   });
 
+  it("keeps the removal entry even when log.md has a foreign heading", async () => {
+    await seedWiki();
+    await writeFile(join(workdir, "wiki", "log.md"), "# Change Log\n\nhand-written\n", "utf8");
+    await removeFromWiki(workdir, "project/foo.md", "2026-08-01");
+
+    const log = await read("wiki/log.md");
+    expect(log).toContain("* **Removal**: Removed [project/foo]");
+    // The existing content is preserved, not overwritten.
+    expect(log).toContain("hand-written");
+  });
+
+  it("separates the new entry from the previous one with a blank line", async () => {
+    await seedWiki();
+    await removeFromWiki(workdir, "project/foo.md", "2026-08-01");
+    await removeFromWiki(workdir, "project/bar.md", "2026-08-02");
+
+    expect(await read("wiki/log.md")).toContain(
+      "* **Removal**: Removed [project/bar](/trash/project/bar.md.orig).\n\n## 2026-08-01",
+    );
+  });
+
   it("keeps earlier log entries pointing at the original path", async () => {
     await seedWiki();
     await writeFile(

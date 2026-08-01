@@ -203,13 +203,19 @@ export async function appendLogMd(
 ): Promise<Result<void>> {
   const logPath = join(wikiRoot, "log.md");
   const existing = await readTextFile(logPath);
-  const header = "# Wiki Update Log\n\n";
+  const header = `${LOG_TITLE}\n\n`;
   const entry = buildLogEntry(date, diff);
-  const body = existing.success
-    ? existing.data.replace(/^# Wiki Update Log\s*\n*/, header + entry)
-    : header + entry;
-  return writeTextFile(logPath, body);
+  if (!existing.success) return writeTextFile(logPath, header + entry);
+  // Strip our own title if present, then re-add it above the new entry. A log
+  // whose first line is something else (hand-edited, or written by an older
+  // version) keeps its content below instead of swallowing the entry: a
+  // silently dropped audit line is worse than an unexpected heading.
+  const previous = existing.data.replace(new RegExp(`^${LOG_TITLE}\\s*\\n*`), "");
+  return writeTextFile(logPath, header + entry + previous);
 }
+
+/** First line of `log.md`. Also the anchor `appendLogMd` splices new entries after. */
+const LOG_TITLE = "# Wiki Update Log";
 
 function buildLogEntry(date: string, diff: WikiDiff): string {
   const lines: string[] = [`## ${date}`, ""];
@@ -229,6 +235,8 @@ function buildLogEntry(date: string, diff: WikiDiff): string {
   if (diff.created.length === 0 && diff.updated.length === 0 && removedCount === 0) {
     lines.push("* **No-op**: No concepts changed.");
   }
-  lines.push("");
+  // Trailing blank line so the next `## <date>` block is separated from this
+  // entry's list and renders as its own section.
+  lines.push("", "");
   return lines.join("\n");
 }
