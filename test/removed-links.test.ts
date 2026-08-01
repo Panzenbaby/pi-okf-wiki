@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  collectConceptLinks,
   compileRemovedConceptRewriter,
   conceptIdFromLinkTarget,
 } from "../src/links.ts";
@@ -87,9 +88,51 @@ describe("compileRemovedConceptRewriter", () => {
     expect(result.content).toBe("[Doc](</trash/project/My Doc.md.orig>)");
   });
 
+  it("redirects a link that carries a title, keeping the title", () => {
+    const rewriter = compileRemovedConceptRewriter(mapping);
+    const result = rewriter.rewrite('[Foo](/project/foo.md "The Plan")', "");
+    expect(result.changed).toBe(true);
+    expect(result.content).toBe('[Foo](/trash/project/foo.md.orig "The Plan")');
+  });
+
+  it("redirects a reference-style definition", () => {
+    const rewriter = compileRemovedConceptRewriter(mapping);
+    const result = rewriter.rewrite("See [foo].\n\n[foo]: /project/foo.md\n", "");
+    expect(result.changed).toBe(true);
+    expect(result.content).toBe("See [foo].\n\n[foo]: /trash/project/foo.md.orig\n");
+  });
+
+  it("leaves links inside fenced code blocks alone", () => {
+    const rewriter = compileRemovedConceptRewriter(mapping);
+    const body = "Example:\n\n```md\n[Foo](/project/foo.md)\n```\n\n[Foo](/project/foo.md)\n";
+    const result = rewriter.rewrite(body, "");
+    expect(result.content).toBe(
+      "Example:\n\n```md\n[Foo](/project/foo.md)\n```\n\n[Foo](/trash/project/foo.md.orig)\n",
+    );
+  });
+
   it("does nothing without mappings", () => {
     const rewriter = compileRemovedConceptRewriter(new Map());
     expect(rewriter.hasMappings).toBe(false);
     expect(rewriter.rewrite("[Foo](/project/foo.md)", "").changed).toBe(false);
+  });
+});
+
+describe("collectConceptLinks", () => {
+  it("finds inline, titled, and reference-style links but not fenced examples", () => {
+    const body = [
+      "[a](/project/foo.md)",
+      '[b](/project/bar.md "Title")',
+      "```",
+      "[c](/project/hidden.md)",
+      "```",
+      "[d]: /project/baz.md",
+    ].join("\n");
+
+    expect(collectConceptLinks(body, "")).toEqual([
+      "project/foo",
+      "project/bar",
+      "project/baz",
+    ]);
   });
 });

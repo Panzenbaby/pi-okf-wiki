@@ -108,8 +108,77 @@ export interface RemovedConceptRewriter {
   rewrite(content: string, sourceDir: string): { content: string; changed: boolean };
 }
 
-/** Markdown link destination: the `(...)` of `[label](...)`, angle form included. */
-const LINK_TARGET_RE = /\]\(\s*(<[^>]*>|[^()\s]*)\s*\)/g;
+/**
+ * Inline link destination: the `(...)` of `[label](target)`. The optional
+ * trailing title (`"…"`, `'…'`, or `(…)`) is captured separately so it can be
+ * carried over verbatim when the destination is replaced — without this group
+ * a titled link does not match at all and would silently keep pointing at a
+ * removed concept.
+ */
+const INLINE_LINK_RE =
+  /\]\(\s*(<[^>]*>|[^()\s]*)((?:\s+(?:"[^"]*"|'[^']*'|\([^()]*\)))?)\s*\)/g;
+
+/**
+ * Reference-style link definition (`[label]: /project/foo.md "Title"`), which
+ * carries a destination just like an inline link and would otherwise be left
+ * dangling. Anchored to the start of a line, per CommonMark's up-to-three
+ * leading spaces.
+ */
+const REFERENCE_DEF_RE = /^([ \t]{0,3}\[[^\]\n]+\]:[ \t]*)(<[^>]*>|\S+)/;
+
+/**
+ * Apply `transform` to every line that is NOT inside a fenced code block.
+ *
+ * Concept bodies routinely contain markdown examples in ``` fences; rewriting
+ * a link inside one would corrupt documentation that only *shows* a link
+ * rather than making one.
+ */
+function mapProseLines(body: string, transform: (line: string) => string): string {
+  let fence: string | null = null;
+  return body
+    .split("\n")
+    .map((line) => {
+      const opener = /^\s*(`{3,}|~{3,})/.exec(line);
+      if (fence !== null) {
+        // Only a fence of the same character (and at least as long) closes it.
+        if (opener !== null && opener[1]!.startsWith(fence[0]!) && opener[1]!.length >= fence.length) {
+          fence = null;
+        }
+        return line;
+      }
+      if (opener !== null) {
+        fence = opener[1]!;
+        return line;
+      }
+      return transform(line);
+    })
+    .join("\n");
+}
+
+/**
+ * Concept ids linked from `body` (inline and reference-style, code fences
+ * excluded), resolved relative to `sourceDir`. Shared with the removal plan so
+ * the confirmation dialog counts exactly the links the rewriter will redirect.
+ */
+export function collectConceptLinks(
+  body: string,
+  sourceDir: string,
+): readonly string[] {
+  const ids: string[] = [];
+  mapProseLines(body, (line) => {
+    for (const match of line.matchAll(INLINE_LINK_RE)) {
+      const conceptId = conceptIdFromLinkTarget(match[1]!, sourceDir);
+      if (conceptId !== null) ids.push(conceptId);
+    }
+    const definition = REFERENCE_DEF_RE.exec(line);
+    if (definition !== null) {
+      const conceptId = conceptIdFromLinkTarget(definition[2]!, sourceDir);
+      if (conceptId !== null) ids.push(conceptId);
+    }
+    return line;
+  });
+  return ids;
+}
 
 /**
  * Compile a rewriter for `mapping` (conceptId -> bundle-relative trash path,
@@ -138,13 +207,29 @@ export function compileRemovedConceptRewriter(
     sourceDir: string,
   ): { content: string; changed: boolean } => {
     let changed = false;
-    const out = body.replace(LINK_TARGET_RE, (match, rawTarget: string) => {
+    const redirect = (rawTarget: string): string | null => {
       const conceptId = conceptIdFromLinkTarget(rawTarget, sourceDir);
-      if (conceptId === null) return match;
+      if (conceptId === null) return null;
       const trashPath = mapping.get(conceptId);
-      if (trashPath === undefined) return match;
+      if (trashPath === undefined) return null;
       changed = true;
-      return `](${encodeLinkTarget(trashPath)})`;
+      return encodeLinkTarget(trashPath);
+    };
+    const out = mapProseLines(body, (line) => {
+      const withInline = line.replace(
+        INLINE_LINK_RE,
+        (match, rawTarget: string, title: string) => {
+          const target = redirect(rawTarget);
+          return target === null ? match : `](${target}${title})`;
+        },
+      );
+      return withInline.replace(
+        REFERENCE_DEF_RE,
+        (match, head: string, rawTarget: string) => {
+          const target = redirect(rawTarget);
+          return target === null ? match : `${head}${target}`;
+        },
+      );
     });
     return { content: out, changed };
   };

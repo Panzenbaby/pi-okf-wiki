@@ -34,7 +34,7 @@ import {
   TRASH_DIR,
   type ConceptRemoval,
 } from "./wiki.ts";
-import { compileRemovedConceptRewriter, conceptIdFromLinkTarget } from "./links.ts";
+import { collectConceptLinks, compileRemovedConceptRewriter } from "./links.ts";
 
 /** A link from a surviving concept to one that is about to be removed. */
 export interface IncomingLink {
@@ -57,9 +57,6 @@ export interface RemovalReport {
   readonly rewrittenConcepts: readonly string[];
 }
 
-/** Markdown link destination — same shape as the rewriter matches. */
-const LINK_TARGET_RE = /\]\(\s*(<[^>]*>|[^()\s]*)\s*\)/g;
-
 /**
  * Report what removing `target` would affect, without changing anything.
  * `target` is a wiki-relative path, with or without a leading `wiki/`: either
@@ -77,11 +74,17 @@ export async function planRemoval(
   if (!concepts.success) return concepts;
 
   const doomed = new Set(resolved.data.conceptIds);
+  const seen = new Set<string>();
   const incomingLinks: IncomingLink[] = [];
   for (const concept of concepts.data) {
     if (doomed.has(concept.conceptId)) continue;
-    for (const toConceptId of linkedConceptIds(concept.body, dirOf(concept.conceptId))) {
+    for (const toConceptId of collectConceptLinks(concept.body, dirOf(concept.conceptId))) {
       if (!doomed.has(toConceptId)) continue;
+      // A concept may cite the same target several times; the dialog lists
+      // relationships, not occurrences.
+      const key = `${concept.conceptId}\u0000${toConceptId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
       incomingLinks.push({ fromConceptId: concept.conceptId, toConceptId });
     }
   }
@@ -92,7 +95,17 @@ export async function planRemoval(
   const survivingIds = new Set(
     concepts.data.map((c) => c.conceptId).filter((id) => !doomed.has(id)),
   );
-  const directories = emptiedDirectories(resolved.data.conceptIds, survivingIds);
+  const candidates = emptiedDirectories(resolved.data.conceptIds, survivingIds);
+  // A directory only disappears if nothing else is left in it. Files that are
+  // not concepts (images, a `references/` folder) are never moved, so they
+  // keep their directory alive — promising otherwise would make the
+  // confirmation dialog lie.
+  const directories: string[] = [];
+  for (const dir of candidates) {
+    const empty = await holdsOnlyDoomedFiles(paths.wiki, dir, doomed);
+    if (!empty.success) return empty;
+    if (empty.data) directories.push(dir);
+  }
 
   return ok({ conceptIds: resolved.data.conceptIds, directories, incomingLinks });
 }
@@ -112,9 +125,6 @@ export async function removeFromWiki(
   const paths = wikiPaths(cwd);
   const resolved = await resolveTarget(paths.wiki, target);
   if (!resolved.success) return resolved;
-
-  const before = await loadAllConcepts(paths.wiki);
-  if (!before.success) return before;
 
   // Move first, then rewrite: a link may only be redirected once its target is
   // known to sit at a collision-resolved trash path.
@@ -156,9 +166,7 @@ export async function removeFromWiki(
   const indexed = await writeAllIndexMd(paths.wiki, after.data);
   if (!indexed.success) return indexed;
 
-  const pruned = await removeEmptyDirs(paths.wiki, (name, isDirectory) =>
-    isDirectory && (name === ARCHIVE_DIR || name === TRASH_DIR),
-  );
+  const pruned = await removeEmptyDirs(paths.wiki);
   if (!pruned.success) return pruned;
 
   const logged = await appendLogMd(paths.wiki, date, {
@@ -199,13 +207,14 @@ async function redirectIncomingLinks(
   const rewriter = compileRemovedConceptRewriter(mapping);
   if (!rewriter.hasMappings) return ok([]);
 
-  const files = await listFiles(wikiRoot, (name, isDirectory) =>
-    isDirectory && (name === ARCHIVE_DIR || name === TRASH_DIR),
-  );
+  const files = await listFiles(wikiRoot);
   if (!files.success) return files;
 
   const rewritten: string[] = [];
   for (const file of files.data) {
+    // Anchored at the bundle root on purpose: a concept directory legitimately
+    // named `project/trash/` is ordinary knowledge and must still be rewritten.
+    if (isRawFilePath(file.relativePath)) continue;
     if (!isConceptFile(file.relativePath)) continue;
     const content = await readTextFile(file.absolutePath);
     if (!content.success) return content;
@@ -245,7 +254,9 @@ async function resolveTarget(
       { path: target },
     );
   }
-  if (segments[0] === ARCHIVE_DIR || segments[0] === TRASH_DIR) {
+  // Case-insensitive: on APFS/NTFS `Archive/foo` reaches the same directory,
+  // so an exact compare would let it through to a confusing later error.
+  if (isRawFilePath(relative)) {
     return err<ResolvedTarget>(
       `${segments[0]}/ holds no concepts — nothing to remove there.`,
       { path: target },
@@ -324,14 +335,33 @@ function emptiedDirectories(
   return emptied.sort((a, b) => b.length - a.length || a.localeCompare(b));
 }
 
-/** Concept ids linked from `body`, resolved relative to `sourceDir`. */
-function linkedConceptIds(body: string, sourceDir: string): readonly string[] {
-  const ids: string[] = [];
-  for (const match of body.matchAll(LINK_TARGET_RE)) {
-    const conceptId = conceptIdFromLinkTarget(match[1]!, sourceDir);
-    if (conceptId !== null) ids.push(conceptId);
+/**
+ * Would `dir` be left empty? True when every file below it is either one of
+ * the concepts being removed or a generated `index.md` (which is pruned with
+ * the directory, not kept).
+ */
+async function holdsOnlyDoomedFiles(
+  wikiRoot: string,
+  dir: string,
+  doomed: ReadonlySet<string>,
+): Promise<Result<boolean>> {
+  const files = await listFiles(join(wikiRoot, ...dir.split("/")));
+  if (!files.success) return files;
+  for (const file of files.data) {
+    const relativePath = `${dir}/${file.relativePath}`;
+    const name = file.relativePath.split("/").pop()!;
+    if (name === "index.md") continue;
+    if (doomed.has(conceptIdFromRelativePath(relativePath))) continue;
+    return ok(false);
   }
-  return ids;
+  return ok(true);
+}
+
+/** Is this bundle-relative path inside `archive/` or `trash/` — the two
+ *  top-level directories that hold raw files rather than concepts? */
+function isRawFilePath(relativePath: string): boolean {
+  const top = relativePath.split("/")[0]!.toLowerCase();
+  return top === ARCHIVE_DIR || top === TRASH_DIR;
 }
 
 function dirOf(conceptId: string): string {

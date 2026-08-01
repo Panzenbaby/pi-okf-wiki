@@ -169,8 +169,24 @@ describe("removeFromWiki", () => {
 
     expect(second.success).toBe(true);
     if (!second.success) return;
-    expect(second.data.removed[0]!.trashPath).not.toBe("/trash/project/foo.md.orig");
+    // Both versions survive, each at its own path, and the second removal's
+    // reported path is the one that actually holds the second version.
+    const secondPath = second.data.removed[0]!.trashPath;
+    expect(secondPath).not.toBe("/trash/project/foo.md.orig");
     expect(await read("wiki/trash/project/foo.md.orig")).toContain("# Foo\n");
+    expect(await read(`wiki${secondPath}`)).toContain("# Foo again");
+    expect(await read("wiki/log.md")).toContain(`(${secondPath})`);
+  });
+
+  it("rewrites concepts in a directory that is merely NAMED trash", async () => {
+    await writeConcept("project/foo.md", "type: note", "# Foo");
+    await writeConcept("project/trash/notes.md", "type: note", "See [Foo](/project/foo.md).");
+    const result = await removeFromWiki(workdir, "project/foo.md", "2026-08-01");
+
+    expect(result.success && result.data.rewrittenConcepts).toEqual(["project/trash/notes"]);
+    expect(await read("wiki/project/trash/notes.md")).toContain(
+      "[Foo](/trash/project/foo.md.orig)",
+    );
   });
 
   it("leaves archived ingest originals untouched", async () => {
@@ -245,6 +261,28 @@ describe("planRemoval", () => {
     const plan = await planRemoval(workdir, "guidelines/rules.md");
 
     expect(plan.success && plan.data.directories).toEqual(["guidelines"]);
+  });
+
+  it("does not promise a directory disappears when a non-concept file stays", async () => {
+    await seedWiki();
+    await writeFile(join(workdir, "wiki", "guidelines", "diagram.png"), "binary", "utf8");
+    const plan = await planRemoval(workdir, "guidelines/rules.md");
+
+    expect(plan.success && plan.data.directories).toEqual([]);
+  });
+
+  it("lists a repeated link once — the dialog shows relationships, not hits", async () => {
+    await writeConcept("project/foo.md", "type: note", "# Foo");
+    await writeConcept(
+      "project/bar.md",
+      "type: note",
+      "See [Foo](/project/foo.md) and again [Foo](/project/foo.md).",
+    );
+    const plan = await planRemoval(workdir, "project/foo.md");
+
+    expect(plan.success && plan.data.incomingLinks).toEqual([
+      { fromConceptId: "project/bar", toConceptId: "project/foo" },
+    ]);
   });
 
   it("does not touch the wiki", async () => {
