@@ -4,12 +4,14 @@
 //   /wiki-update — ingest new documents from input/ into the wiki/ bundle.
 //   /wiki-query  — answer a question against the wiki with source citations.
 //   /wiki-remove — move a concept or a whole directory into the bundle trash.
+//   /wiki-migrate — rewrite legacy v0.1 concepts (timestamp, # Citations) to v0.2.
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { runUpdate, intakeSessionRegistry } from "./update.ts";
 import { runQuery, querySessionRegistry, buildWikiQueryContext } from "./query.ts";
 import { removeFromWiki } from "./remove.ts";
+import { migrateWiki } from "./migrate.ts";
 
 export default function okfExtension(pi: ExtensionAPI): void {
   // After any agent turn, finalize a pending /wiki-update run (if any) so the
@@ -81,6 +83,22 @@ export default function okfExtension(pi: ExtensionAPI): void {
         parts.push(`redirected links in ${rewrittenConcepts.length} concept(s)`);
       }
       ctx.ui.notify(parts.join(" — "), "info");
+    },
+  });
+
+  pi.registerCommand("wiki-migrate", {
+    description: "Rewrite legacy OKF v0.1 concepts (timestamp, # Citations) to v0.2",
+    handler: async (_args, ctx) => {
+      const result = await migrateWiki(ctx.cwd);
+      if (!result.success) {
+        ctx.ui.notify(`/wiki-migrate failed: ${result.error.message}`, "error");
+        return;
+      }
+      const { migrated, alreadyCurrent } = result.data;
+      const message = migrated.length > 0
+        ? `Migrated ${migrated.length} concept(s) to OKF v0.2 (${alreadyCurrent} already current): ${migrated.join(", ")}`
+        : `Nothing to migrate — all ${alreadyCurrent} concept(s) are already OKF v0.2.`;
+      ctx.ui.notify(message, "info");
     },
   });
 }

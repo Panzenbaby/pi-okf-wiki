@@ -15,6 +15,7 @@ the concepts that back it.
 | `/wiki-update` | Ingest new documents from `input/` into the `wiki/` bundle, archive the originals, regenerate `index.md` / `log.md`, and show a summary. |
 | `/wiki-query <question>` | Answer a question against the wiki, with every claim cited to a `wiki/<concept-id>.md` source. |
 | `/wiki-remove <path>` | Move a concept (or a whole directory of concepts) into `wiki/trash/`, redirect links that pointed at it, and regenerate `index.md` / `log.md`. |
+| `/wiki-migrate` | Rewrite legacy OKF v0.1 concepts to v0.2: `timestamp` becomes `generated: { by, at }` and the body `# Citations` list is lifted into the `sources` frontmatter. Deterministic (no agent turn); already-current concepts are untouched. |
 
 ## Folder layout
 
@@ -235,8 +236,9 @@ trust and provenance families (§5): `generated: { by, at }` records who wrote
 the content and when, and the `sources` list records what it derives from,
 with per-claim attribution via markdown footnotes keyed to `sources[].id`.
 Existing v0.1 concepts (legacy `timestamp`, body `# Citations`) remain
-readable — consumers fall back per §13.1. `index.md` and `log.md` are
-reserved filenames maintained by `/wiki-update`. See the
+readable — consumers fall back per §13.1 — and can be upgraded in place with
+`/wiki-migrate`. `index.md` and `log.md` are reserved filenames maintained by
+`/wiki-update`. See the
 [OKF spec](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md)
 for the full format.
 
