@@ -36,12 +36,44 @@ export interface Frontmatter {
   readonly description: string | undefined;
   readonly resource: string | undefined;
   readonly tags: readonly string[];
+  /** LEGACY (OKF v0.1): superseded by `generated.at` (§13.1). Read-only fallback. */
   readonly timestamp: string | undefined;
   /** Producer-defined (§4.1): `current` | `superseded` by convention. Open string. */
   readonly status: string | undefined;
   /** Producer-defined (§4.1): bundle-relative paths to concepts this one supersedes. */
   readonly supersedes: readonly string[];
+  /** OKF v0.2 trust (§5.2): how the current content was produced. */
+  readonly generated: ActorEvent | undefined;
+  /**
+   * OKF v0.2 trust (§5.2): verification events. A bare `{ by, at }` mapping in
+   * YAML is normalized to a one-element list at parse time (spec MUST).
+   */
+  readonly verified: readonly ActorEvent[];
+  /** OKF v0.2 provenance (§5.1): the materials this concept derives from. */
+  readonly sources: readonly SourceEntry[];
+  /** OKF v0.2 lifecycle (§5.5): ISO 8601 instant on/after which content is stale. */
+  readonly staleAfter: string | undefined;
   readonly raw: Readonly<Record<string, unknown>>;
+}
+
+/** A `{ by, at }` event (§5.2). `by` uses the actor convention (§7). */
+export interface ActorEvent {
+  readonly by: string | undefined;
+  readonly at: string | undefined;
+}
+
+/** One `sources` entry (§5.1). `resource` is REQUIRED by the spec but kept
+ * optional here — a malformed entry is preserved, never rejected (§11). */
+export interface SourceEntry {
+  readonly id: string | undefined;
+  readonly resource: string | undefined;
+  readonly title: string | undefined;
+  /** Credibility signal (§5.1): who/what produced the source (actor convention, §7). */
+  readonly author: string | undefined;
+  /** Credibility signal (§5.1): how often the resource was exercised. */
+  readonly usageCount: number | undefined;
+  /** Credibility signal (§5.1): when the source itself last changed. */
+  readonly lastModified: string | undefined;
 }
 
 /** A concept document read from the wiki. */

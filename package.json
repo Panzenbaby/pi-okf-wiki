@@ -4,7 +4,12 @@
   "description": "Pi extension that implements the Open Knowledge Format (OKF) as a local knowledge base with /wiki-update and /wiki-query commands.",
   "license": "MIT",
   "type": "module",
-  "keywords": ["pi-package", "okf", "knowledge-base", "wiki"],
+  "keywords": [
+    "pi-package",
+    "okf",
+    "knowledge-base",
+    "wiki"
+  ],
   "homepage": "https://github.com/Panzenbaby/pi-okf-wiki",
   "repository": {
     "type": "git",
@@ -20,7 +25,9 @@
     "LICENSE"
   ],
   "pi": {
-    "extensions": ["./src/index.ts"]
+    "extensions": [
+      "./src/index.ts"
+    ]
   },
   "scripts": {
     "check": "tsc --noEmit -p tsconfig.json",
@@ -32,7 +39,8 @@
     "html-to-text": "^10.0.0",
     "jszip": "^3.10.1",
     "mammoth": "^1.8.0",
-    "unpdf": "^1.6.2"
+    "unpdf": "^1.6.2",
+    "yaml": "^2.9.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"

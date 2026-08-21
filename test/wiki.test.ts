@@ -30,6 +30,10 @@ const frontmatter = (
   timestamp: undefined,
   status: undefined,
   supersedes: [],
+  generated: undefined,
+  verified: [],
+  sources: [],
+  staleAfter: undefined,
   raw: {},
   ...overrides,
 });
