@@ -5,39 +5,54 @@
 import type { StructurePreview } from "./wiki.ts";
 
 /**
- * The archive-citation rule, stated ONCE and interpolated into both OKF_RULES
- * and the STEP 2 conflict bullet so the two cannot drift apart. Archived
- * originals are cited in the body `# Citations` section with a
- * `/archive/<input-relative-path>` placeholder link (original input path,
- * NOT the renamed archive destination); the finalize step rewrites the
- * placeholder to the renamed path. `resource:` stays a canonical URI only.
+ * The provenance rule (OKF v0.2 §5.1), stated ONCE and interpolated into both
+ * OKF_RULES and the STEP 2 conflict bullet so the two cannot drift apart.
+ * Provenance lives in the \`sources\` frontmatter list; archived originals use
+ * a \`/archive/<input-relative-path>\` placeholder as the entry's \`resource\`
+ * (original input path, NOT the renamed archive destination); the finalize
+ * step rewrites the placeholder to the renamed path. Per-claim attribution
+ * uses footnotes keyed to \`sources[].id\`. The top-level \`resource:\` stays a
+ * canonical URI only.
  */
-const ARCHIVE_CITATION_RULE = `Cite sources under a # Citations heading, numbered [1] [2]. Two kinds:
-  * External source → a normal markdown link to its URL.
-  * Archived original from THIS run → a markdown link of the EXACT form
-    \`[label](/archive/<input-relative-path>)\`, where \`<input-relative-path>\`
-    is the path shown for the source in the file list below (the \`input/...\`
-    prefix stripped). ALWAYS use the ORIGINAL input relative path here, never
-    the precomputed archive destination and never plain text — the system
-    rewrites these links to the actual (collision-renamed) archive path after
-    you move the originals. If the input path contains spaces, wrap the URL in
-    angle brackets so the link stays valid markdown:
-    \`[label](</archive/<input-relative-path with spaces>>)\`. Example: for
-    \`input/notes/spec-v2.pdf\` cite as \`[spec v2](/archive/notes/spec-v2.pdf)\`.
-  NEVER put an archive path in the frontmatter \`resource\` field — \`resource\`
-  holds a canonical URI only; archive originals are cited in # Citations.`;
+const SOURCES_RULE = `Record provenance in the \`sources\` frontmatter list (§5.1). One entry per
+  source, each with a stable \`id\` (short slug), a \`resource\`, and a \`title\`:
+  * External source → \`resource\` is its URL.
+  * Archived original from THIS run → \`resource\` is EXACTLY
+    \`/archive/<input-relative-path>\`, where \`<input-relative-path>\` is the
+    path shown for the source in the file list below (the \`input/...\` prefix
+    stripped). ALWAYS use the ORIGINAL input relative path, never the
+    precomputed archive destination — the system rewrites these values to the
+    actual (collision-renamed) archive path after you move the originals.
+    Example entry for \`input/notes/spec-v2.pdf\`:
+    \`- { id: spec-v2, resource: /archive/notes/spec-v2.pdf, title: Spec v2 }\`.
+    Quote the resource (\`resource: "/archive/my doc.pdf"\`) when the path
+    contains spaces.
+  Attribute individual claims with a markdown footnote whose label is the
+  source's \`id\`: write \`...the value is 42.[^spec-v2]\` in the body and define
+  \`[^spec-v2]: Spec v2\` at the bottom. The footnote label is the join key
+  into \`sources\` — never cite by position ([1], [2]) and never use a body
+  # Citations list (that is the superseded v0.1 form).
+  NEVER put an archive path in the TOP-LEVEL frontmatter \`resource\` field —
+  it holds a canonical URI only; archive paths belong in \`sources[].resource\`.`;
 
-const OKF_RULES = `OKF (Open Knowledge Format) rules for a concept file:
+const OKF_RULES = `OKF (Open Knowledge Format, v0.2) rules for a concept file:
 - A concept is a markdown file with YAML frontmatter delimited by --- lines.
 - Frontmatter MUST contain a non-empty \`type\` field. Recommended: \`title\`,
   \`description\`, \`resource\` (canonical URI, optional — NEVER an archive path),
-  \`tags\` (flow list like \`[a, b]\`), \`timestamp\` (ISO 8601). Producers MAY add
-  extra keys (§4.1); consumers preserve them.
-- The body is structural markdown: headings (# Schema, # Examples, # Citations
-  where applicable), lists, tables, fenced code blocks.
+  \`tags\` (flow list like \`[a, b]\`).
+- Record how the content was produced with
+  \`generated: { by: <actor>, at: <ISO 8601 datetime with UTC offset> }\` (§5.2).
+  The actor (§7) is \`pi-okf-wiki/<your model id>\` (producer/version form,
+  e.g. \`pi-okf-wiki/claude-sonnet-4\`). Do NOT write the legacy v0.1
+  \`timestamp\` key in new or rewritten concepts.
+- Producers MAY add extra keys (§4.1); consumers preserve them. Do NOT invent
+  \`verified\` entries — verification is recorded by humans/processes that
+  actually confirmed the content, not by the writer.
+- The body is structural markdown: headings (# Schema, # Examples where
+  applicable), lists, tables, fenced code blocks.
 - Link related concepts with bundle-relative links like
   [title](/tables/orders.md). Broken links are tolerated.
-- ${ARCHIVE_CITATION_RULE}
+- ${SOURCES_RULE}
 - One concept per real-world entity: do NOT split a single entity into parallel
   concept files just because several input files describe it. Variants,
   versions, and superseded values are expressed INSIDE one concept body, not
@@ -45,13 +60,15 @@ const OKF_RULES = `OKF (Open Knowledge Format) rules for a concept file:
 - Contradictions are knowledge too. When multiple sources disagree on an
   attribute of the same concept, do NOT silently pick one value and discard
   the others. Make the conflict visible in the body (a # Versions / # Conflicts
-  table or prose), cite each source, and mark the canonical value.
+  table or prose), cite each source via its footnote, and mark the canonical
+  value.
 - Temporal precedence: when values conflict, prefer the one with the latest
-  \`timestamp\` (or a "neueste Version" / "latest" marker) as canonical; mark
-  older values as superseded. Use the producer-defined frontmatter fields
+  source date (\`sources[].last_modified\`, the source's own \`generated.at\` or
+  legacy \`timestamp\`, or a "neueste Version" / "latest" marker) as canonical;
+  mark older values as superseded. Use the producer-defined frontmatter fields
   \`status: current | superseded\` and \`supersedes: [/path/to/older.md]\` (a
   bundle-relative path LIST, so one concept can supersede several older ones)
-  to make the precedence graph explicit. Absent timestamps => keep the conflict
+  to make the precedence graph explicit. Absent dates => keep the conflict
   unresolved and label all values as "unverified".`;
 
 export interface UpdatePromptInput {
@@ -154,21 +171,23 @@ ${input.wikiDir}/<concept-id>.md:
   parent directory first with \`mkdir -p ${input.wikiDir}/<directory>\` before
   writing the file.
 - Frontmatter: type, title, description, tags (flow list \`[a, b]\`),
-  timestamp (ISO 8601). Optional: \`status: current | superseded\` and
+  \`generated: { by: pi-okf-wiki/<your model id>, at: <ISO 8601> }\` (set \`at\`
+  to now), and the \`sources\` list (one entry per source in the cluster).
+  Optional: \`status: current | superseded\` and
   \`supersedes: [/path/to/older.md]\` (bundle-relative path list) to mark the
-  precedence graph. For a cluster, set the concept \`timestamp\` to the latest
-  source timestamp (or now, if sources carry none).
-- Body: structured markdown. Extract schemas, examples, and citations where
-  present. Express variants/versions INSIDE the body (a # Versions table or a
-  # Conflicts section), linked and explained — not as parallel concept files.
+  precedence graph.
+- Body: structured markdown. Extract schemas and examples where present, and
+  attribute claims with \`[^id]\` footnotes keyed to \`sources\`. Express
+  variants/versions INSIDE the body (a # Versions table or a # Conflicts
+  section), linked and explained — not as parallel concept files.
 - CONFLICT HANDLING: if the cluster's sources disagree on the same attribute
   (e.g. colour = green in one file, blue in another), do NOT pick one silently.
   Make the disagreement visible:
     * Add a # Conflicts (or # Versions) table: one row per source with columns
-      for the differing attribute(s), the source value, the source citation,
-: and the source timestamp.
-    * ${ARCHIVE_CITATION_RULE}
-    * Choose a CANONICAL value using temporal precedence (latest timestamp /
+      for the differing attribute(s), the source value, the source footnote
+      (\`[^id]\`), and the source date.
+    * ${SOURCES_RULE}
+    * Choose a CANONICAL value using temporal precedence (latest source date /
       "neueste Version" / "latest" marker wins) and state it explicitly in the
       description and in the # Schema. Mark superseded values as such.
     * If no source is clearly newer, leave ALL conflicting values in the table
@@ -237,10 +256,24 @@ Conflict & completeness rules (IMPORTANT):
 - A single concept may hold several values for one attribute (a # Conflicts /
   # Versions table) when its sources disagree. Before answering, OPEN the
   concept and read the whole body — do not answer from a snippet alone.
-- When the concept declares a CANONICAL value (via timestamp precedence,
-  \`status: current\`, or an explicit "canonical" statement), answer with the
-  canonical value, but ALSO note that other sources disagree (e.g. "grün
-  (kanonisch laut neuester Version); ältere Quelle nennt blau").
+- When the concept declares a CANONICAL value (via temporal precedence on
+  \`generated.at\` / legacy \`timestamp\`, \`status: current\`, or an explicit
+  "canonical" statement), answer with the canonical value, but ALSO note that
+  other sources disagree (e.g. "grün (kanonisch laut neuester Version);
+  ältere Quelle nennt blau").
+
+Trust & freshness rules (OKF v0.2):
+- Trust tier from \`verified\` (§5.3): no \`verified\` => unverified; verified
+  only by non-\`human:\` actors => machine-confirmed; verified by a
+  \`human:<id>\` actor => human-reviewed. When concepts conflict, prefer the
+  higher tier and the fresher \`generated.at\`; when you rely on an unverified
+  concept for a substantive claim, say so.
+- When \`stale_after\` lies in the past or \`status\` is \`deprecated\`, still
+  answer if it is the best available knowledge, but flag it explicitly as
+  possibly stale/deprecated.
+- \`sources\` entries and \`[^id]\` footnotes tell you which source backs which
+  claim; when the user asks where a fact comes from, resolve the footnote
+  label through the concept's \`sources\` list.
 - When NO canonical value is declared, do NOT pick one silently. State that
   the wiki records conflicting values, list each value with its source, and
   label them unverified. Do not present a single value as fact.

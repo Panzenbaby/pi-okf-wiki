@@ -88,16 +88,16 @@ describe("rewriteArchiveCitationLinks", () => {
     });
   });
 
-  it("does NOT rewrite placeholder paths inside the frontmatter (resource: is canonical URI)", () => {
-    // `resource:` holds a canonical URI per OKF §4.1; the prompt forbids archive
-    // paths there. The rewriter is BODY-ONLY, so a stray `/archive/...` in the
-    // frontmatter is left as-is rather than silently fixed.
-    const content = `---\ntype: concept\nresource: /archive/notes/spec-v2.pdf\n---\n\nbody`;
+  it("rewrites placeholder paths inside the frontmatter (v0.2 sources[].resource, §5.1)", () => {
+    // v0.2 moves provenance into the frontmatter: an archive placeholder in a
+    // `sources[].resource` value must be renamed together with body links.
+    const content = `---\ntype: concept\nsources:\n  - id: spec\n    resource: /archive/notes/spec-v2.pdf\n---\n\nbody`;
     const mapping = new Map([["notes/spec-v2.pdf", "notes/spec-v2.2026-07-19-1719.pdf"]]);
-    expect(rewriteArchiveCitationLinks(content, mapping)).toEqual({
-      content,
-      changed: false,
-    });
+    const result = rewriteArchiveCitationLinks(content, mapping);
+    expect(result.changed).toBe(true);
+    expect(result.content).toContain(
+      "resource: /archive/notes/spec-v2.2026-07-19-1719.pdf",
+    );
   });
 
   it("rewrites a placeholder that appears only in the body, leaving frontmatter verbatim", () => {
@@ -152,12 +152,11 @@ describe("rewriteArchiveCitationLinks", () => {
     });
   });
 
-  it("does not rewrite a placeholder that appears ONLY in the frontmatter (newline boundary is irrelevant; body-only)", () => {
-    const content = `---\ntype: concept\nresource: /archive/a.md\n---\n\nbody`;
+  it("rewrites a placeholder that appears ONLY in the frontmatter (whole-document scope)", () => {
+    const content = `---\ntype: concept\nsources:\n  - resource: /archive/a.md\n---\n\nbody`;
     const mapping = new Map([["a.md", "a.2026-07-19-1719.md"]]);
-    expect(rewriteArchiveCitationLinks(content, mapping)).toEqual({
-      content,
-      changed: false,
-    });
+    const result = rewriteArchiveCitationLinks(content, mapping);
+    expect(result.changed).toBe(true);
+    expect(result.content).toContain("resource: /archive/a.2026-07-19-1719.md");
   });
 });

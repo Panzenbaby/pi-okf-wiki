@@ -27,7 +27,7 @@ export function err<T>(message: string, extras: Partial<AppError> = {}): Result<
  * so the precedence graph is first-class: `renderConceptForPrompt` surfaces
  * them to the query agent without it having to open the file. `status` stays
  * an open string (the prompt convention is `current` | `superseded`, but
- * producers MAY use other values — §9 forbids rejecting them); `supersedes`
+ * producers MAY use other values — §11 forbids rejecting them); `supersedes`
  * is a path list so a concept can supersede several older ones (merge).
  */
 export interface Frontmatter {

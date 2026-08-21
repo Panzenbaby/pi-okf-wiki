@@ -161,11 +161,23 @@ describe("rewriteArchiveCitationsInConcepts", () => {
     expect(await readConcept("t/c.md")).toBe(original);
   });
 
-  it("does not rewrite placeholder links inside the frontmatter (resource: is canonical URI, out of scope)", async () => {
-    // Per OKF §4.1 `resource:` holds a canonical URI; the prompt forbids archive
-    // paths there. The rewriter touches the BODY only, so even a stray
-    // `/archive/a.md` in `resource:` is left as-is rather than silently fixed.
-    const original = `---\ntype: t\nresource: /archive/a.md\n---\n\n[x](/archive/a.md)`;
+  it("rewrites placeholder values in the frontmatter (v0.2 sources[].resource, §5.1)", async () => {
+    // In OKF v0.2 provenance lives in the `sources` frontmatter; the archive
+    // placeholder appears as a `resource:` value there and MUST be rewritten
+    // together with any body links.
+    const original = [
+      "---",
+      "type: t",
+      "sources:",
+      "  - id: a",
+      "    resource: /archive/a.md",
+      "    title: A",
+      "---",
+      "",
+      "claim.[^a]",
+      "",
+      "[^a]: A",
+    ].join("\n");
     await writeConcept("t/c.md", original);
     await rewriteArchiveCitationsInConcepts(
       workdir,
@@ -173,7 +185,19 @@ describe("rewriteArchiveCitationsInConcepts", () => {
       new Map([["a.md", "a.2026-07-19-1719.md"]]),
     );
     const after = await readConcept("t/c.md");
-    expect(after).toContain("resource: /archive/a.md"); // frontmatter untouched
-    expect(after).toContain("[x](/archive/a.2026-07-19-1719.md)"); // body rewritten
+    expect(after).toContain("resource: /archive/a.2026-07-19-1719.md");
+    expect(after).not.toContain("resource: /archive/a.md");
+  });
+
+  it("rewrites a quoted sources resource with spaces, preserving the quotes' boundary", async () => {
+    const original = `---\ntype: t\nsources:\n  - id: doc\n    resource: "/archive/my doc.pdf"\n---\n\nbody`;
+    await writeConcept("t/c.md", original);
+    await rewriteArchiveCitationsInConcepts(
+      workdir,
+      new Set(["t/c"]),
+      new Map([["my doc.pdf", "my doc.2026-07-19-1719.pdf"]]),
+    );
+    const after = await readConcept("t/c.md");
+    expect(after).toContain('resource: "/archive/my doc.2026-07-19-1719.pdf"');
   });
 });

@@ -1,17 +1,20 @@
 // Archive-citation link rewriting.
 //
-// The agent cites archived originals in a concept body as markdown links of
-// the form `[label](/archive/<input-relative-path>)`, using the ORIGINAL input
-// relative path as a stable placeholder. After the agent moves each original
-// into `archive/` — possibly under a collision-renamed path (see
-// `resolveArchiveTarget` in files.ts) — the finalize step rewrites those
-// placeholder links to the real archive path so a UI can open them directly.
+// The agent cites archived originals with the ORIGINAL input relative path as
+// a stable placeholder: `/archive/<input-relative-path>`. In OKF v0.2 those
+// placeholders live primarily in the `sources[].resource` frontmatter entries
+// (§5.1), and may also appear as markdown links in the body. After the agent
+// moves each original into `archive/` — possibly under a collision-renamed
+// path (see `resolveArchiveTarget` in files.ts) — the finalize step rewrites
+// those placeholders to the real archive path so a consumer can follow them.
 //
-// Scope: ONLY the concept BODY (after the closing `---` frontmatter fence) is
-// rewritten. Frontmatter is left byte-for-byte untouched — `resource:` holds
-// a canonical URI per OKF §4.1 (never an archive path; the prompt forbids
-// that), and rewriting frontmatter would silently paper over an agent misuse.
-// Archive citations live in the `# Citations` body section.
+// Scope: the WHOLE document (frontmatter + body). v0.1 kept frontmatter
+// byte-for-byte untouched because provenance lived in a body `# Citations`
+// list and the only path-valued frontmatter key was the top-level `resource:`
+// (canonical URI, never an archive path). v0.2 moves provenance INTO the
+// frontmatter (`sources[].resource` legitimately holds `/archive/...` paths,
+// §5.1/§6.2), so the rewriter must reach it. The top-level `resource:` rule
+// is unchanged and remains enforced by the prompt, not by this rewriter.
 //
 // This module is pure + total (no IO, no exceptions) so the rename behavior is
 // deterministic and unit-testable independent of the agent and filesystem.
@@ -36,14 +39,14 @@ export interface ArchiveRewriter {
  * per finalize run, not once per concept.
  *
  * The alternation is ordered longest-first so the longest key wins at each
- * position, and is anchored with an end boundary `(?=[)\\s>]|$)` so a shorter
+ * position, and is anchored with an end boundary `(?=[)\\s>"']|$)` so a shorter
  * key cannot prefix-match inside a longer path that is NOT a mapping key
  * (e.g. mapping `{a.md}` must not rewrite `/archive/a.md.bak` — a different
- * file). The boundary accepts the three forms the prompt actually produces:
- * a plain markdown link close `)`, an angle-bracket link close `>` (for paths
- * with spaces, `[label](</archive/...>)`), and a frontmatter / line end
- * (`\\s` or end-of-string). Identity mappings (original == archive) are
- * skipped.
+ * file). The boundary accepts the forms the prompt actually produces: a plain
+ * markdown link close `)`, an angle-bracket link close `>` (for paths with
+ * spaces, `[label](</archive/...>)`), a closing YAML quote (`"` or `'` for a
+ * quoted `sources[].resource` value), and a line / end-of-string boundary
+ * (`\\s` or `$`). Identity mappings (original == archive) are skipped.
  */
 export function compileArchiveRewriter(
   mapping: ReadonlyMap<string, string>,
@@ -58,28 +61,23 @@ export function compileArchiveRewriter(
   }
   const lookup = new Map(entries);
   const alternation = entries.map(([orig]) => escapeRegex(orig)).join("|");
-  const re = new RegExp(`/archive/(?:${alternation})(?=[)\\s>]|$)`, "g");
-
-  const rewriteBody = (body: string): { content: string; changed: boolean } => {
-    if (!body.includes("/archive/")) return { content: body, changed: false };
-    let changed = false;
-    const out = body.replace(re, (match) => {
-      const origRel = match.slice("/archive/".length);
-      const archiveRel = lookup.get(origRel);
-      if (archiveRel === undefined) return match;
-      changed = true;
-      return `/archive/${archiveRel}`;
-    });
-    return { content: out, changed };
-  };
+  const re = new RegExp(`/archive/(?:${alternation})(?=[)\\s>"']|$)`, "g");
 
   return {
     hasMappings: true,
+    // The whole document (frontmatter + body) is rewritten — v0.2 provenance
+    // placeholders live in `sources[].resource` frontmatter values (§5.1).
     rewrite(content: string) {
-      const { frontmatter, body } = splitFrontmatter(content);
-      const result = rewriteBody(body);
-      if (!result.changed) return { content, changed: false };
-      return { content: frontmatter + result.content, changed: true };
+      if (!content.includes("/archive/")) return { content, changed: false };
+      let changed = false;
+      const out = content.replace(re, (match) => {
+        const origRel = match.slice("/archive/".length);
+        const archiveRel = lookup.get(origRel);
+        if (archiveRel === undefined) return match;
+        changed = true;
+        return `/archive/${archiveRel}`;
+      });
+      return { content: changed ? out : content, changed };
     },
   };
 }
@@ -100,9 +98,11 @@ export function rewriteArchiveCitationLinks(
 export interface RemovedConceptRewriter {
   readonly hasMappings: boolean;
   /**
-   * Rewrite links to removed concepts in the BODY of the concept stored at
-   * `sourceDir` (its bundle-relative directory, `""` for the bundle root).
-   * `sourceDir` is needed because a link target may be relative to the file
+   * Rewrite references to removed concepts in the concept stored at
+   * `sourceDir` (its bundle-relative directory, `""` for the bundle root):
+   * markdown links in the BODY plus `resource:` values in the frontmatter
+   * (`sources[].resource` may point at another concept, §5.1/§6.2).
+   * `sourceDir` is needed because a target may be relative to the file
    * that contains it.
    */
   rewrite(content: string, sourceDir: string): { content: string; changed: boolean };
@@ -184,10 +184,13 @@ export function collectConceptLinks(
  * Compile a rewriter for `mapping` (conceptId -> bundle-relative trash path,
  * e.g. `project/foo` -> `/trash/project/foo.md.orig`).
  *
- * Only the BODY is rewritten; frontmatter stays byte-for-byte untouched, for
- * the same reason as {@link compileArchiveRewriter} — `resource:` holds a
- * canonical URI per OKF §4.1, and silently rewriting it would paper over a
- * misuse rather than surface it.
+ * The BODY is rewritten link-by-link. In the FRONTMATTER, only `resource:`
+ * values are considered (line-based, byte-preserving for everything else):
+ * a v0.2 `sources[].resource` may legitimately point at another concept in
+ * the bundle (§5.1/§6.2), and leaving it dangling after a removal would
+ * silently break the provenance graph. A top-level `resource:` naming a
+ * removed concept is redirected by the same rule — it referenced that
+ * concept, and the trash path is where it now lives.
  *
  * Targets are matched by resolving each link destination to a conceptId, so
  * every spelling of the same concept is caught: root-relative
@@ -202,16 +205,22 @@ export function compileRemovedConceptRewriter(
   if (mapping.size === 0) {
     return { hasMappings: false, rewrite: (c) => ({ content: c, changed: false }) };
   }
+  const redirectTarget = (rawTarget: string, sourceDir: string): string | null => {
+    const conceptId = conceptIdFromLinkTarget(rawTarget, sourceDir);
+    if (conceptId === null) return null;
+    const trashPath = mapping.get(conceptId);
+    if (trashPath === undefined) return null;
+    return trashPath;
+  };
+
   const rewriteBody = (
     body: string,
     sourceDir: string,
   ): { content: string; changed: boolean } => {
     let changed = false;
     const redirect = (rawTarget: string): string | null => {
-      const conceptId = conceptIdFromLinkTarget(rawTarget, sourceDir);
-      if (conceptId === null) return null;
-      const trashPath = mapping.get(conceptId);
-      if (trashPath === undefined) return null;
+      const trashPath = redirectTarget(rawTarget, sourceDir);
+      if (trashPath === null) return null;
       changed = true;
       return encodeLinkTarget(trashPath);
     };
@@ -234,15 +243,59 @@ export function compileRemovedConceptRewriter(
     return { content: out, changed };
   };
 
+  /**
+   * Redirect `resource:` values in the frontmatter, line-based so every other
+   * frontmatter byte (key order, comments, quoting of other values) is
+   * preserved. Matches both the top-level `resource:` and list-item
+   * `- resource:` / indented `resource:` forms of a `sources` entry.
+   */
+  const rewriteFrontmatter = (
+    frontmatter: string,
+    sourceDir: string,
+  ): { content: string; changed: boolean } => {
+    if (frontmatter === "") return { content: frontmatter, changed: false };
+    let changed = false;
+    const out = frontmatter
+      .split("\n")
+      .map((line) => {
+        const match = /^(\s*(?:-\s+)?resource:\s*)(\S.*?)\s*$/.exec(line);
+        if (match === null) return line;
+        const rawValue = unquoteYaml(match[2]!);
+        const trashPath = redirectTarget(rawValue, sourceDir);
+        if (trashPath === null) return line;
+        changed = true;
+        return `${match[1]!}${quoteYamlIfNeeded(trashPath)}`;
+      })
+      .join("\n");
+    return { content: out, changed };
+  };
+
   return {
     hasMappings: true,
     rewrite(content: string, sourceDir: string) {
       const { frontmatter, body } = splitFrontmatter(content);
-      const result = rewriteBody(body, sourceDir);
-      if (!result.changed) return { content, changed: false };
-      return { content: frontmatter + result.content, changed: true };
+      const fmResult = rewriteFrontmatter(frontmatter, sourceDir);
+      const bodyResult = rewriteBody(body, sourceDir);
+      if (!fmResult.changed && !bodyResult.changed) return { content, changed: false };
+      return { content: fmResult.content + bodyResult.content, changed: true };
     },
   };
+}
+
+/** Strip a single level of matching YAML quotes from a scalar value. */
+function unquoteYaml(value: string): string {
+  if (
+    (value.startsWith('"') && value.endsWith('"') && value.length >= 2) ||
+    (value.startsWith("'") && value.endsWith("'") && value.length >= 2)
+  ) {
+    return value.slice(1, -1);
+  }
+  return value;
+}
+
+/** Quote a YAML scalar when it needs it (spaces / quote chars / `#`). */
+function quoteYamlIfNeeded(value: string): string {
+  return /[\s"'#]/.test(value) ? `"${value.replace(/"/g, '\\"')}"` : value;
 }
 
 /**

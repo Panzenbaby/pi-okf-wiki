@@ -1,6 +1,6 @@
 // index.md and log.md generation.
 //
-// Per OKF §6, an `index.md` MAY appear in any directory to support
+// Per OKF §8, an `index.md` MAY appear in any directory to support
 // progressive disclosure — it enumerates THAT directory's direct contents
 // (concepts + child subdirectories), not a recursive dump of the whole tree.
 // We therefore generate one `index.md` per qualifying directory (root + every
@@ -9,9 +9,9 @@
 // `archive/` is never indexed (it holds raw originals, not knowledge — see
 // `src/wiki/paths.ts`).
 //
-// Per OKF §11, the bundle-root `index.md` is the ONLY `index.md` permitted to
+// Per OKF §12, the bundle-root `index.md` is the ONLY `index.md` permitted to
 // carry frontmatter, where it MAY declare the targeted OKF version. We always
-// emit `okf_version: "0.1"` there so the bundle is self-describing.
+// emit `okf_version: "0.2"` there so the bundle is self-describing.
 
 import { join } from "node:path";
 import { ok, type Concept, type Result } from "../types.ts";
@@ -19,8 +19,8 @@ import { listFiles, readTextFile, removeFile, writeTextFile } from "../files.ts"
 import { ARCHIVE_DIR, TRASH_DIR } from "./paths.ts";
 import type { WikiDiff } from "./concepts.ts";
 
-/** OKF spec version this bundle targets (§11). Declared in root `index.md` frontmatter. */
-export const OKF_VERSION = "0.1";
+/** OKF spec version this bundle targets (§12). Declared in root `index.md` frontmatter. */
+export const OKF_VERSION = "0.2";
 
 /** Bundle directories that hold raw files, not knowledge — never indexed. */
 const UNINDEXED_DIRS: readonly string[] = [ARCHIVE_DIR, TRASH_DIR];
@@ -93,7 +93,7 @@ function directConcepts(
  * Render the `index.md` body for a single directory: subdirectories first
  * (bare `* [name/](name/)` links — no fabricated description), then direct
  * concepts (alphabetical by concept id) with title + description. The root
- * directory is just the `""` instance of this same format (§6).
+ * directory is just the `""` instance of this same format (§8).
  */
 export function generateDirIndexMd(
   dir: string,
@@ -131,7 +131,7 @@ export function generateDirIndexMd(
 
 /**
  * Render the ROOT `index.md`: the per-dir format for `""`, prefixed with the
- * `okf_version` frontmatter block (§11 — the only `index.md` allowed frontmatter).
+ * `okf_version` frontmatter block (§12 — the only `index.md` allowed frontmatter).
  */
 export function generateRootIndexMd(
   concepts: readonly Concept[],
@@ -146,7 +146,7 @@ export function generateRootIndexMd(
  * subdirectory, and prune orphan `index.md` files in directories that no
  * longer qualify (e.g. after a concept was removed and its directory became
  * empty of concepts). Pruning is best-effort: an individual unlink failure is
- * skipped (the orphan stays, which §5.3 tolerates). The root `index.md` is
+ * skipped (the orphan stays, which §11 tolerates). The root `index.md` is
  * never pruned (`""` is always in `indexDirs`).
  */
 export async function writeAllIndexMd(
@@ -189,7 +189,7 @@ async function pruneOrphanIndexMd(
     if (segments[segments.length - 1] !== "index.md") continue;
     const dir = segments.length === 1 ? "" : segments.slice(0, -1).join("/");
     if (indexDirs.has(dir)) continue; // still qualifies — keep
-    // Orphan: best-effort removal. A failure leaves the file (§5.3 tolerates).
+    // Orphan: best-effort removal. A failure leaves the file (§11 tolerates).
     const removed = await removeFile(file.absolutePath);
     if (!removed.success) continue;
   }

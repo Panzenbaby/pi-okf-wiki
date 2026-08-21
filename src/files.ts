@@ -119,7 +119,7 @@ export async function removeFile(path: string): Promise<Result<void>> {
  * `<origSuffix>` is `.orig` iff the original `relativePath` is a `.md` file,
  * empty otherwise. The `.orig` is the OUTERMOST suffix (always last, after any
  * collision stamp) so the archived file never ends in `.md` — it is therefore
- * not a concept document per OKF §3.1 and the bundle stays §9.1-conformant
+ * not a concept document per OKF §3.1 and the bundle stays §11-conformant
  * (archived `.md` originals typically carry no OKF frontmatter). Binary
  * originals (pdf, docx, …) keep their real extension unchanged so handlers
  * can open them by extension.

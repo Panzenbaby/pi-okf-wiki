@@ -28,10 +28,11 @@ The extension operates on two folders at the project root (`ctx.cwd`):
     └── trash/      # concepts land here when they are removed from the wiki
 ```
 
-Both `archive/` and `trash/` live *inside* the bundle so that links into them
-are bundle-relative, which is an OKF §8-sanctioned citation form. Neither is
-indexed, and `.md` files in them carry an outermost `.orig` suffix so they are
-not concept documents per §3.1 and the bundle stays conformant (§9.1).
+Both `archive/` and `trash/` live *inside* the bundle so that references to
+them are bundle-relative paths, an OKF §6-sanctioned form for links and
+path-valued fields (§6.2). Neither is indexed, and `.md` files in them carry
+an outermost `.orig` suffix so they are not concept documents per §3.1 and
+the bundle stays conformant (§11).
 
 Missing folders are created on the first `/wiki-update`.
 
@@ -190,16 +191,18 @@ entity but disagree on a value, the agent does **not** silently pick one.
 Instead it records the disagreement inside the single concept body:
 
 - A `# Conflicts` (or `# Versions`) table — one row per source with the
-  differing attribute, its value, citation, and timestamp.
-- Each source cited under a `# Citations` heading (numbered `[1]` `[2]`). A
-  citation to an archived original is a markdown link of the form
-  `[label](/archive/<input-relative-path>)` using the ORIGINAL input relative
-  path; the extension rewrites that placeholder to the actual (collision-renamed)
-  archive path after the originals are moved, so the link stays resolvable when
-  a file was renamed on archiving. Only the concept **body** is rewritten — the
-  `resource:` frontmatter field stays a canonical URI (never an archive path).
+  differing attribute, its value, its source footnote, and the source date.
+- Each source recorded as a `sources` frontmatter entry (`{ id, resource,
+  title }`, §5.1) with per-claim attribution via footnotes keyed to the
+  entry's `id` (`[^spec-v2]`). For an archived original, `resource` is a
+  placeholder of the form `/archive/<input-relative-path>` using the ORIGINAL
+  input relative path; the extension rewrites that placeholder to the actual
+  (collision-renamed) archive path after the originals are moved, so the
+  reference stays resolvable when a file was renamed on archiving. The
+  top-level `resource:` frontmatter field stays a canonical URI (never an
+  archive path).
 - A **canonical** value chosen by temporal precedence: the value with the
-  latest `timestamp` / “latest” marker wins and is stated in the `description`
+  latest source date / “latest” marker wins and is stated in the `description`
   and `# Schema`; older values are marked superseded. If no source is clearly
   newer, all conflicting values stay in the table labelled **unverified** and
   no canonical value is declared.
@@ -225,16 +228,21 @@ If `wiki/` does not exist or has no concepts, `/wiki-query` tells you to run
 
 ## OKF conformance
 
-Concepts are markdown files with YAML frontmatter; `type` is the only required
-field. Recommended fields: `title`, `description`, `resource`, `tags`,
-`timestamp`. `index.md` and `log.md` are reserved filenames maintained by
-`/wiki-update`. See the
+The extension targets **OKF v0.2**. Concepts are markdown files with YAML
+frontmatter; `type` is the only required field. Recommended fields: `title`,
+`description`, `resource`, `tags`. New and rewritten concepts carry the v0.2
+trust and provenance families (§5): `generated: { by, at }` records who wrote
+the content and when, and the `sources` list records what it derives from,
+with per-claim attribution via markdown footnotes keyed to `sources[].id`.
+Existing v0.1 concepts (legacy `timestamp`, body `# Citations`) remain
+readable — consumers fall back per §13.1. `index.md` and `log.md` are
+reserved filenames maintained by `/wiki-update`. See the
 [OKF spec](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md)
 for the full format.
 
-The bundle declares its target spec version via `okf_version: "0.1"` in the
-root `index.md` frontmatter (§11 — the only `index.md` permitted to carry
-frontmatter). Per OKF §6, `/wiki-update` writes one `index.md` per qualifying
+The bundle declares its target spec version via `okf_version: "0.2"` in the
+root `index.md` frontmatter (§12 — the only `index.md` permitted to carry
+frontmatter). Per OKF §8, `/wiki-update` writes one `index.md` per qualifying
 directory (root + every directory that contains a concept, directly or
 transitively) for progressive disclosure; each lists only its own direct
 concepts and immediate child subdirectories. Orphan `index.md` files in
@@ -243,11 +251,12 @@ directories that no longer contain any concept are pruned on the next
 
 `wiki/archive/` is a **producer-specific OKF extension**, not part of the
 spec's `references/` model: it holds the raw original files (PDFs, DOCX, …)
-that back the concepts, so citation links to them stay **bundle-relative**
-(`/archive/<rel>`) — one of the three §8-sanctioned citation link forms. It is
-tolerated by the spec because consumers ignore non-`.md` files (§9); archived
-`.md` originals carry an outermost `.orig` suffix so they never count as
-concept documents (§3.1 / §9.1). `archive/` is never listed in any `index.md`.
+that back the concepts, so `sources[].resource` values pointing at them stay
+**bundle-relative** (`/archive/<rel>`) — one of the three §6.2-sanctioned
+path forms. It is tolerated by the spec because consumers ignore non-`.md`
+files (§11); archived `.md` originals carry an outermost `.orig` suffix so
+they never count as concept documents (§3.1 / §11). `archive/` is never
+listed in any `index.md`.
 
 Example concept (`wiki/tables/orders.md`):
 
@@ -257,24 +266,30 @@ type: BigQuery Table
 title: Orders
 description: One row per completed order.
 tags: [sales, orders]
-timestamp: 2026-07-03T00:00:00Z
+generated: { by: pi-okf-wiki/claude-sonnet-4, at: 2026-07-03T00:00:00Z }
+sources:
+  - id: orders-spec
+    resource: /archive/notes/orders-spec.pdf
+    title: Orders schema spec
 ---
 
 # Schema
 
 | Column        | Type   | Description                       |
 |---------------|--------|-----------------------------------|
-| `order_id`    | STRING | Unique order identifier.          |
+| `order_id`    | STRING | Unique order identifier.[^orders-spec] |
 | `customer_id` | STRING | FK to [customers](/tables/customers.md). |
 
 Part of the [sales dataset](/datasets/sales.md).
+
+[^orders-spec]: Orders schema spec
 ```
 
 > **Link styles:** inside concept files, links are bundle-relative
-> (`/tables/orders.md` — absolute, relative to the `wiki/` bundle, the §5.1
+> (`/tables/orders.md` — absolute, relative to the `wiki/` bundle, the §6.1
 > recommended form). In `index.md` files, links are relative to that
 > directory (`orders.md` from `tables/`, or `tables/orders.md` from the
-> root) per the §6 example. These two styles mirror the spec's own
+> root) per the §8 example. These two styles mirror the spec's own
 > conventions for concepts vs. index files, not two competing rules. In
 > `/wiki-query` answers, links are repo-relative (`wiki/tables/orders.md`)
 > because the answer renders outside the bundle, from the project root — a

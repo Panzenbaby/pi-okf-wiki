@@ -55,13 +55,17 @@ describe("compileRemovedConceptRewriter", () => {
     expect(result.content).toBe("[Foo](/trash/project/foo.md.orig)");
   });
 
-  it("leaves frontmatter byte-for-byte untouched", () => {
+  it("redirects a frontmatter resource: naming the removed concept (v0.2)", () => {
+    // v0.1 left frontmatter byte-for-byte untouched; in v0.2 a `resource:`
+    // (top-level or sources[].resource) pointing at a removed concept is
+    // redirected so the provenance graph does not silently dangle. All other
+    // frontmatter bytes are preserved.
     const rewriter = compileRemovedConceptRewriter(mapping);
     const content = `---\ntype: note\nresource: /project/foo.md\n---\n\n[Foo](/project/foo.md)\n`;
     const result = rewriter.rewrite(content, "");
     expect(result.changed).toBe(true);
     expect(result.content).toBe(
-      `---\ntype: note\nresource: /project/foo.md\n---\n\n[Foo](/trash/project/foo.md.orig)\n`,
+      `---\ntype: note\nresource: /trash/project/foo.md.orig\n---\n\n[Foo](/trash/project/foo.md.orig)\n`,
     );
   });
 
@@ -115,6 +119,45 @@ describe("compileRemovedConceptRewriter", () => {
     const rewriter = compileRemovedConceptRewriter(new Map());
     expect(rewriter.hasMappings).toBe(false);
     expect(rewriter.rewrite("[Foo](/project/foo.md)", "").changed).toBe(false);
+  });
+});
+
+describe("compileRemovedConceptRewriter frontmatter (v0.2 sources)", () => {
+  it("redirects a sources[].resource that points at the removed concept (§5.1)", () => {
+    const rewriter = compileRemovedConceptRewriter(mapping);
+    const content = [
+      "---",
+      "type: note",
+      "sources:",
+      "  - id: foo",
+      "    resource: /project/foo.md",
+      "    title: Foo",
+      "---",
+      "",
+      "claim.[^foo]",
+      "",
+      "[^foo]: Foo",
+    ].join("\n");
+    const result = rewriter.rewrite(content, "guidelines");
+    expect(result.changed).toBe(true);
+    expect(result.content).toContain("resource: /trash/project/foo.md.orig");
+    expect(result.content).not.toContain("resource: /project/foo.md");
+  });
+
+  it("resolves a relative sources resource against the containing directory", () => {
+    const rewriter = compileRemovedConceptRewriter(mapping);
+    const content = `---\ntype: note\nsources:\n  - id: foo\n    resource: ../project/foo.md\n---\n\nbody`;
+    const result = rewriter.rewrite(content, "guidelines");
+    expect(result.changed).toBe(true);
+    expect(result.content).toContain("resource: /trash/project/foo.md.orig");
+  });
+
+  it("leaves non-matching and external resources untouched", () => {
+    const rewriter = compileRemovedConceptRewriter(mapping);
+    const content = `---\ntype: note\nresource: https://example.com/foo\nsources:\n  - id: other\n    resource: /project/bar.md\n---\n\nbody`;
+    const result = rewriter.rewrite(content, "");
+    expect(result.changed).toBe(false);
+    expect(result.content).toBe(content);
   });
 });
 
