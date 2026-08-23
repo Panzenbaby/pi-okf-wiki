@@ -91,6 +91,29 @@ describe("migrateConcept", () => {
     expect(reparsed.body).toContain("# Examples");
   });
 
+  it("derives a speaking id for a titleless URL that ends in a slash", () => {
+    const concept = conceptOf(
+      "t/c",
+      [
+        "---",
+        "type: t",
+        "timestamp: 2026-07-03T00:00:00Z",
+        "---",
+        "",
+        "## Citations",
+        "",
+        "[1] Board (kanonisch): <https://miro.com/app/board/uXjVJ5YDoxQ=/>",
+        "[2] Startseite: <https://miro.com/>",
+        "",
+      ].join("\n"),
+    );
+    const reparsed = parseDocument(migrateConcept(concept)!);
+    expect(reparsed.frontmatter?.sources).toEqual([
+      { id: "uxjvj5ydoxq", resource: "https://miro.com/app/board/uXjVJ5YDoxQ=/" },
+      { id: "miro-com", resource: "https://miro.com/" },
+    ]);
+  });
+
   it("merges citations into existing sources without duplicating resources", () => {
     const concept = conceptOf(
       "t/c",

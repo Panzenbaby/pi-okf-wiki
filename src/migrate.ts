@@ -284,9 +284,14 @@ function countChar(value: string, character: string): number {
   return count;
 }
 
-/** Slug for a citation id: from its title, else the target's basename. */
+/**
+ * Slug for a citation id: from its title, else from the resource. The id is
+ * the join key body footnotes resolve against (§5.1), so a URL ending in a
+ * slash must not collapse to the anonymous `source` — fall back to the last
+ * non-empty path segment and then to the host before giving up.
+ */
 function slugForCitation(citation: Citation): string {
-  const base = citation.title ?? citation.resource.split("/").pop() ?? "source";
+  const base = citation.title ?? slugSourceFromResource(citation.resource);
   const slug = base
     .toLowerCase()
     .replace(/[^\p{L}\p{N}]+/gu, "-")
@@ -294,6 +299,20 @@ function slugForCitation(citation: Citation): string {
     .slice(0, 40)
     .replace(/^-+|-+$/g, "");
   return slug === "" ? "source" : slug;
+}
+
+function slugSourceFromResource(resource: string): string {
+  let path = resource;
+  let host = "";
+  try {
+    const url = new URL(resource);
+    path = decodeURIComponent(url.pathname);
+    host = url.hostname;
+  } catch {
+    // Not a URL: a plain path or prose, both usable as they are.
+  }
+  const segment = path.split("/").filter((part) => part.trim() !== "").pop();
+  return segment ?? host;
 }
 
 function uniqueId(slug: string, used: Set<string>): string {
