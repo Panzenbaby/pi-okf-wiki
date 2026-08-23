@@ -49,8 +49,8 @@ pi install npm:pi-okf-wiki
 
 ```bash
 pi install git:github.com/Panzenbaby/pi-okf-wiki
-# or, for a specific ref:
-pi install git:github.com/Panzenbaby/pi-okf-wiki@v0.1.0
+# or pin a specific tag:
+pi install git:github.com/Panzenbaby/pi-okf-wiki@<tag>
 ```
 
 ### Local / development
@@ -232,6 +232,60 @@ current is `deprecated`; the one that replaced it lists it in `supersedes`.
 If `wiki/` does not exist or has no concepts, `/wiki-query` tells you to run
 `/wiki-update` first instead of inventing an answer.
 
+### Trust, freshness, and attribution
+
+Answers weigh the OKF v0.2 trust families rather than treating every concept as
+equally reliable:
+
+- **Trust tier** derived from `verified` (§5.3): no `verified` means
+  *unverified*, verification by non-`human:` actors only means
+  *machine-confirmed*, and a `human:<id>` verifier means *human-reviewed*. When
+  concepts conflict, the higher tier and the fresher `generated.at` win. If an
+  answer rests on an unverified concept for a substantive claim, it says so.
+- **Freshness**: a concept past its `stale_after` or marked
+  `status: deprecated` is still used when it is the best available knowledge,
+  but is flagged as possibly stale rather than presented as current.
+- **Attribution**: when you ask where a fact comes from, the agent resolves the
+  body footnote label (`[^spec-v2]`) through the concept's `sources` list to
+  the actual source entry.
+
+## How `/wiki-migrate` works
+
+Upgrades a legacy OKF v0.1 bundle to v0.2 in place. It is deterministic — no
+agent turn, no model call — so the result is reproducible and reviewable in a
+diff.
+
+Per concept it applies the three v0.1 conventions OKF v0.2 supersedes:
+
+| v0.1 | v0.2 |
+| --- | --- |
+| `timestamp: <ISO>` | `generated: { by: pi-okf-wiki/legacy, at: <ISO> }` (§5.2) |
+| body `# Citations` list | `sources` frontmatter entries `{ id, resource, title }` (§5.1) |
+| `status: current` / `superseded` | `status: stable` / `deprecated` (§5.4) |
+
+The legacy actor `pi-okf-wiki/legacy` is used because the model that originally
+wrote a v0.1 concept is not recorded anywhere, and `generated.by` is required
+within `generated`. No footnotes are fabricated: per-claim attribution cannot
+be reconstructed after the fact, and `sources` without body footnotes is fully
+conformant.
+
+Guarantees:
+
+- Concepts that are already v0.2 are left **byte-for-byte** untouched, and a
+  run that changes nothing writes nothing at all — not even `log.md`.
+- Unknown, producer-defined frontmatter keys survive the rewrite unchanged
+  (§4.1), as does key order.
+- `# Citations` inside a fenced code block is left alone — a concept that
+  *documents* the v0.1 format is not mistaken for one that uses it.
+- Afterwards `index.md` (now declaring `okf_version: "0.2"`) and `log.md` are
+  regenerated.
+
+> `/wiki-migrate` rewrites the files in `wiki/` in place. Keep a copy if you
+> want a way back.
+
+Migrating is recommended but not required: v0.1 concepts stay readable either
+way (see [OKF conformance](#okf-conformance)).
+
 ## OKF conformance
 
 The extension targets **OKF v0.2**. Concepts are markdown files with YAML
@@ -321,10 +375,10 @@ leaks outside its repository.
 
 | File | Responsibility |
 | --- | --- |
-| `src/index.ts` | Registers the `/wiki-update` and `/wiki-query` commands; owns the `agent_end` finalize hook and the `before_agent_start` query-context hook (both via the session registries). |
+| `src/index.ts` | Registers the `/wiki-update`, `/wiki-query`, `/wiki-remove`, and `/wiki-migrate` commands; owns the `agent_end` finalize hook and the `before_agent_start` query-context hook (both via the session registries). |
 | `src/types.ts` | `Result<T>`, `AppError`, OKF domain models, and the `IgnoreReason` code union. |
 | `src/session.ts` | `Session` interface and the generic `SessionRegistry<T>` that owns the single-slot handoff between a command handler and an event hook. |
-| `src/frontmatter.ts` | Minimal YAML frontmatter parser for the OKF subset. |
+| `src/frontmatter.ts` | YAML frontmatter parsing and serialization for OKF v0.2, backed by the `yaml` package (v0.2 needs nested maps and lists of maps). Parses permissively per §11: a malformed block is repaired and re-read rather than rejected, so a concept never disappears silently over a stray colon or asterisk. Also exports `serializeDocument` for deterministic writers. |
 | `src/files.ts` | Filesystem helpers, all returning `Result<T>` (incl. `copyFile`, `removeDir`). |
 | `src/wiki.ts` | Barrel re-exporting the `wiki/` modules so the `./wiki.ts` import surface stays stable for `update.ts`, `query.ts`, `classifier.ts`, and `prompts.ts`. |
 | `src/wiki/paths.ts` | `wikiPaths`, `conceptIdFromRelativePath`, `isConceptFile`, `relativePosix`, `ARCHIVE_DIR`, `TRASH_DIR`, `WikiPaths`. |
@@ -332,8 +386,9 @@ leaks outside its repository.
 | `src/wiki/index-log.ts` | `index.md` / `log.md` generation (`generateIndexMd`, `writeIndexMd`, `appendLogMd`, `buildLogEntry`). |
 | `src/wiki/retrieval.ts` | Structure preview and TF-IDF cosine retrieval. The `Retriever` interface is the seam injected into `/wiki-query`; `TermFrequencyRetriever` is the default implementation (it replaces the former `retrieveConcepts` free function, which is kept as a thin wrapper). IDF is computed on the fly from the loaded concepts so common terms are downweighted in any language — no hardcoded stopword list. Also exports: `tokenize`, `renderConceptForPrompt`, `renderWikiTree`, `displayTitle`, `buildStructurePreview`. |
 | `src/prompts.ts` | Agent prompt builders for ingestion and query. |
-| `src/links.ts` | Pure link rewriters (no IO). `compileArchiveRewriter` / `rewriteArchiveCitationLinks` rewrite `/archive/<input-relative-path>` placeholder citation links in a concept BODY (frontmatter untouched) to the actual (post-rename) archive path. `compileRemovedConceptRewriter` / `conceptIdFromLinkTarget` resolve any spelling of a concept link (root-relative, `wiki/`-prefixed, or relative to the citing file) to a conceptId and redirect removed ones to their `/trash/` path. |
-| `src/remove.ts` | `/wiki-remove` logic: `planRemoval` (what would be affected, incl. incoming links — no mutation) and `removeFromWiki` (move to trash, redirect links, regenerate `index.md`, append the `Removal` log entry, collapse emptied directories). Deterministic, no agent turn. |
+| `src/links.ts` | Pure link rewriters (no IO). `compileArchiveRewriter` / `rewriteArchiveCitationLinks` rewrite `/archive/<input-relative-path>` placeholders to the actual (post-rename) archive path across the WHOLE document — in v0.2 those placeholders live in `sources[].resource` frontmatter values, not only in body links. `compileRemovedConceptRewriter` / `conceptIdFromLinkTarget` resolve any spelling of a concept reference (root-relative, `wiki/`-prefixed, or relative to the citing file) to a conceptId and redirect removed ones to their `/trash/` path, in body links and frontmatter `resource:` values alike. `collectConceptReferences` is the read-only counterpart used by the removal preview, so preview and rewriter cannot drift apart. |
+| `src/migrate.ts` | `/wiki-migrate` logic: deterministic v0.1→v0.2 concept rewriting (`timestamp`→`generated`, body `# Citations`→`sources`, legacy `status` values→the §5.4 lifecycle). No agent turn; already-current concepts stay byte-identical and a no-op run writes nothing. |
+| `src/remove.ts` | `/wiki-remove` logic: `planRemoval` (what would be affected, incl. incoming references from bodies and from frontmatter `resource:` values — no mutation) and `removeFromWiki` (move to trash, redirect links, regenerate `index.md`, append the `Removal` log entry, collapse emptied directories). Deterministic, no agent turn. |
 | `src/update.ts` | `/wiki-update` command logic and the `IntakeSession` (finalize) that owns the agent-handoff state, including the post-agent citation-link rewrite (`rewriteArchiveCitationsInConcepts`). |
 | `src/classifier.ts` | `InputClassifier` that owns the full input→bucket pipeline AND the deterministic conformant intake: tentative dispatch by extension, the extraction pass (staging extracted text), and pass 3 — read + verify frontmatter + write to `wiki/` + archive original — for conformant `.md` files. Emits the three final buckets (`conformantImported` / `forAgent` / `ignored`) once, in input order. |
 | `src/query.ts` | `/wiki-query` command logic and the `QuerySession` that owns the pending question. Both `buildWikiQueryContext` and `runQuery` take an optional `Retriever` (default `TermFrequencyRetriever`) so the scoring strategy is injectable. |
