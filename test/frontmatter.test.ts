@@ -106,6 +106,40 @@ describe("parseDocument frontmatter", () => {
     expect(doc.frontmatter?.description).toBe("Steps: triage");
   });
 
+  it("repairs more broken lines than any fixed cap would allow", () => {
+    // The repair budget follows the line count, so a long sloppy block does
+    // not lose its tail at an arbitrary cliff.
+    const broken = Array.from({ length: 25 }, (_, i) => `k${i}: v${i}: x`);
+    const doc = parseDocument(`---\ntype: note\n${broken.join("\n")}\n---\n\nbody\n`);
+    expect(doc.frontmatter?.type).toBe("note");
+    expect(doc.frontmatter?.raw["k24"]).toBe("v24: x");
+  });
+
+  it("leaves a URL value with its colon untouched", () => {
+    const doc = parseDocument(
+      "---\ntype: note\nresource: https://example.com/x\n---\n\nbody\n",
+    );
+    expect(doc.frontmatter?.resource).toBe("https://example.com/x");
+  });
+
+  it("keeps the other keys when a value is an unrepairable quoted key", () => {
+    // `title: "a": b` reports the same nested-mapping error, but the value is
+    // already quoted, so there is nothing to quote — the rest still survives.
+    const doc = parseDocument("---\ntype: note\ntitle: \"a\": b\n---\n\nbody\n");
+    expect(doc.frontmatter?.type).toBe("note");
+  });
+
+  it("tolerates a value YAML reads as a flow map", () => {
+    const doc = parseDocument("---\ntype: note\ndescription: {a} 50% done\n---\n\nbody\n");
+    expect(doc.frontmatter?.type).toBe("note");
+    expect(doc.frontmatter?.description).toBeUndefined();
+  });
+
+  it("yields an empty frontmatter for an empty or comment-only block", () => {
+    expect(parseDocument("---\n---\n\nbody\n").frontmatter?.type).toBeUndefined();
+    expect(parseDocument("---\n# nothing\n---\n\nbody\n").frontmatter?.tags).toEqual([]);
+  });
+
   it("tolerates tab indentation, duplicate keys, and an unclosed flow list", () => {
     const tabbed = parseDocument("---\ntype: note\ntags:\n\t- sales\n---\n\nbody\n");
     expect(tabbed.frontmatter?.type).toBe("note");
@@ -119,9 +153,14 @@ describe("parseDocument frontmatter", () => {
   });
 
   it("returns null frontmatter only when nothing is recoverable", () => {
-    const doc = parseDocument("---\n- a\n- b\n---\n\nbody\n");
-    expect(doc.frontmatter).toBeNull();
-    expect(doc.body.trim()).toBe("body");
+    // A list, a bare scalar, and an alias with no anchor carry no key/value
+    // pairs at all — there is nothing to salvage, so the file is deferred.
+    const list = parseDocument("---\n- a\n- b\n---\n\nbody\n");
+    expect(list.frontmatter).toBeNull();
+    expect(list.body.trim()).toBe("body");
+
+    expect(parseDocument("---\njust a string\n---\n\nbody\n").frontmatter).toBeNull();
+    expect(parseDocument("---\ntype: note\ntitle: *star\n---\n\nbody\n").frontmatter).toBeNull();
   });
 
   it("coerces numeric list items to strings (tags: [2024])", () => {

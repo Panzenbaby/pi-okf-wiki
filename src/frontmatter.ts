@@ -80,9 +80,6 @@ export function serializeDocument(
   return `${FENCE}\n${yaml}\n${FENCE}\n\n${trimmedBody}`;
 }
 
-/** Cap on repair rounds, so a pathological block cannot spin. */
-const MAX_REPAIRS = 10;
-
 /**
  * Parse a YAML block to a plain record, recovering as much as possible from a
  * malformed block; null only when nothing usable remains (the block is a list
@@ -100,9 +97,15 @@ const MAX_REPAIRS = 10;
  * also the most likely defect in agent-written frontmatter. We quote the value
  * at the offset the parser itself reports and re-parse with the same parser,
  * so this stays one YAML implementation, not a hand-rolled fallback.
+ *
+ * Each repair quotes one line, so the line count bounds the loop: every round
+ * makes progress and no fixable line is left behind. A fixed cap would put a
+ * silent cliff in the middle of a sloppy block — the tail would vanish exactly
+ * like the concepts this recovery exists to save.
  */
 function parseYamlBlock(text: string): Record<string, unknown> | null {
   let current = text;
+  const maxRepairs = text.split("\n").length;
   for (let attempt = 0; ; attempt++) {
     const doc = parseYamlDocument(current, {
       strict: false,
@@ -112,7 +115,7 @@ function parseYamlBlock(text: string): Record<string, unknown> | null {
     const nestedMapping = doc.errors.find(
       (error) => error.code === "BLOCK_AS_IMPLICIT_KEY",
     );
-    if (nestedMapping !== undefined && attempt < MAX_REPAIRS) {
+    if (nestedMapping !== undefined && attempt < maxRepairs) {
       const repaired = quoteValueAt(current, nestedMapping.pos[0]);
       if (repaired !== null) {
         current = repaired;
