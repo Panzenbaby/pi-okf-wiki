@@ -187,6 +187,7 @@ const CITATIONS_HEADING_RE = /^#{1,6}\s+Citations\s*$/i;
 const MARKDOWN_LINK_RE = /\[([^\]]*)\]\(\s*(<[^>]*>|[^()\s]+)\s*\)/;
 const LIST_ITEM_RE = /^\s*(?:[-*+]|\d+[.)])?\s*(?:\[\d+\]\s+)?(.*)$/;
 const BULLET_RE = /^\s*(?:[-*+]|\d+[.)]|\[\d+\])\s/;
+const AUTOLINK_RE = /<((?:[a-z][a-z0-9+.-]*:|\.{0,2}\/)[^<>\s]*)>/i;
 const BARE_URL_RE = /(https?:\/\/\S+)/;
 
 /**
@@ -230,6 +231,13 @@ export function extractCitations(body: string): ExtractedCitations | null {
       }
       const title = link[1]!.trim();
       entries.push({ resource: target, title: title === "" ? undefined : title });
+      continue;
+    }
+    // A markdown autolink delimits its target, so the closing `>` belongs to
+    // the syntax and must not reach the bare-URL fallback as part of the URL.
+    const autolink = AUTOLINK_RE.exec(text);
+    if (autolink !== null) {
+      entries.push({ resource: autolink[1]!, title: undefined });
       continue;
     }
     const url = BARE_URL_RE.exec(text);

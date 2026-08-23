@@ -226,6 +226,31 @@ describe("extractCitations", () => {
     ]);
   });
 
+  it("keeps the autolink delimiter out of the resource", () => {
+    const result = extractCitations(
+      [
+        "## Citations",
+        "",
+        "[1] Board (kanonisch): <https://miro.com/app/board/uXjVJ5YDoxQ=/>",
+        "[2] [manifest.json](</archive/Miro Export/discovery-radar-live/manifest.json>)",
+        "[21] BBC — the loneliest place on Instagram: <https://www.bbc.com/future/article/20250814-the-loneliest-place-on-instagram>",
+        "",
+      ].join("\n"),
+    );
+    expect(result?.entries).toEqual([
+      { resource: "https://miro.com/app/board/uXjVJ5YDoxQ=/", title: undefined },
+      {
+        resource: "/archive/Miro Export/discovery-radar-live/manifest.json",
+        title: "manifest.json",
+      },
+      {
+        resource:
+          "https://www.bbc.com/future/article/20250814-the-loneliest-place-on-instagram",
+        title: undefined,
+      },
+    ]);
+  });
+
   it("ignores a # Citations example inside a code fence", () => {
     const body = [
       "# Beispiel",
