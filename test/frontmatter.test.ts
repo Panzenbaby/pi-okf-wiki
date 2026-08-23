@@ -153,14 +153,44 @@ describe("parseDocument frontmatter", () => {
   });
 
   it("returns null frontmatter only when nothing is recoverable", () => {
-    // A list, a bare scalar, and an alias with no anchor carry no key/value
-    // pairs at all — there is nothing to salvage, so the file is deferred.
+    // A list and a bare scalar carry no key/value pairs at all — there is
+    // nothing to salvage, so the file is deferred.
     const list = parseDocument("---\n- a\n- b\n---\n\nbody\n");
     expect(list.frontmatter).toBeNull();
     expect(list.body.trim()).toBe("body");
 
     expect(parseDocument("---\njust a string\n---\n\nbody\n").frontmatter).toBeNull();
-    expect(parseDocument("---\ntype: note\ntitle: *star\n---\n\nbody\n").frontmatter).toBeNull();
+  });
+
+  it("keeps a concept whose value starts with * (markdown emphasis, not an alias)", () => {
+    const emphasized = parseDocument(
+      "---\ntype: note\ntitle: *Draft* spec\ndescription: x\n---\n\nbody\n",
+    );
+    expect(emphasized.frontmatter?.type).toBe("note");
+    expect(emphasized.frontmatter?.title).toBe("*Draft* spec");
+    expect(emphasized.frontmatter?.description).toBe("x");
+
+    const trailing = parseDocument(
+      "---\ndescription: *vorläufig*\ntype: note\n---\n\nbody\n",
+    );
+    expect(trailing.frontmatter?.description).toBe("*vorläufig*");
+    expect(trailing.frontmatter?.type).toBe("note");
+
+    const inList = parseDocument("---\ntags: [a, *b*, *c*]\ntype: note\n---\n\nbody\n");
+    expect(inList.frontmatter?.tags).toEqual(["a", "*b*", "*c*"]);
+    expect(inList.frontmatter?.type).toBe("note");
+
+    const unterminated = parseDocument("---\ntype: note\ntitle: *star\n---\n\nbody\n");
+    expect(unterminated.frontmatter?.type).toBe("note");
+    expect(unterminated.frontmatter?.title).toBe("*star");
+  });
+
+  it("still resolves a legitimate anchor/alias pair", () => {
+    const doc = parseDocument(
+      "---\ntype: note\ntitle: &t Orders\ndescription: *t\n---\n\nbody\n",
+    );
+    expect(doc.frontmatter?.title).toBe("Orders");
+    expect(doc.frontmatter?.description).toBe("Orders");
   });
 
   it("coerces numeric list items to strings (tags: [2024])", () => {
@@ -267,6 +297,9 @@ describe("serializeDocument", () => {
     const parsed = parseDocument(original);
     expect(parsed.frontmatter).not.toBeNull();
     const serialized = serializeDocument(parsed.frontmatter!.raw, parsed.body);
+    // The source has no trailing newline; the serialized document must still
+    // end with one, or a migrated file drifts from every other file.
+    expect(serialized.endsWith("[^policy]: Revenue policy\n")).toBe(true);
     const reparsed = parseDocument(serialized);
     expect(reparsed.frontmatter?.raw).toEqual(parsed.frontmatter!.raw);
     expect(reparsed.frontmatter?.generated).toEqual(parsed.frontmatter!.generated);
@@ -277,6 +310,7 @@ describe("serializeDocument", () => {
   it("emits a well-formed document for a minimal record", () => {
     const out = serializeDocument({ type: "note" }, "body text\n");
     expect(out.startsWith("---\n")).toBe(true);
+    expect(out.endsWith("body text\n")).toBe(true);
     const parsed = parseDocument(out);
     expect(parsed.frontmatter?.type).toBe("note");
     expect(parsed.body.trim()).toBe("body text");

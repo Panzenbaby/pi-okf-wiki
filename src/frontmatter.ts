@@ -25,7 +25,14 @@
 // The legacy v0.1 `timestamp` key is still surfaced so consumers can fall
 // back to it when `generated` is absent (§13.1).
 
-import { parseDocument as parseYamlDocument, stringify as stringifyYaml } from "yaml";
+import {
+  isAlias,
+  isCollection,
+  parseDocument as parseYamlDocument,
+  stringify as stringifyYaml,
+  visit,
+  type Document,
+} from "yaml";
 
 import type { ActorEvent, Frontmatter, SourceEntry } from "./types.ts";
 
@@ -76,8 +83,8 @@ export function serializeDocument(
   body: string,
 ): string {
   const yaml = stringifyYaml(raw).trimEnd();
-  const trimmedBody = body.replace(/^\n+/, "");
-  return `${FENCE}\n${yaml}\n${FENCE}\n\n${trimmedBody}`;
+  const trimmedBody = body.replace(/^\n+/, "").trimEnd();
+  return `${FENCE}\n${yaml}\n${FENCE}\n\n${trimmedBody}\n`;
 }
 
 /**
@@ -91,32 +98,36 @@ export function serializeDocument(
  * `strict` is off so recoverable whitespace and indentation slips stay
  * warnings.
  *
- * One error class gets a targeted repair: an unquoted colon in a value
- * (`title: Orders: the table`) is read as a nested mapping, which swallows
- * every following key into it — losing far more than the offending line. It is
- * also the most likely defect in agent-written frontmatter. We quote the value
- * at the offset the parser itself reports and re-parse with the same parser,
- * so this stays one YAML implementation, not a hand-rolled fallback.
+ * Two defect classes get a targeted repair, both by quoting the offending
+ * value and re-parsing with the same parser — this stays one YAML
+ * implementation, not a hand-rolled fallback:
  *
- * Each repair quotes one line, so the line count bounds the loop: every round
- * makes progress and no fixable line is left behind. A fixed cap would put a
- * silent cliff in the middle of a sloppy block — the tail would vanish exactly
- * like the concepts this recovery exists to save.
+ * - An unquoted colon in a value (`title: Orders: the table`) is read as a
+ *   nested mapping, which swallows every following key into it — losing far
+ *   more than the offending line. We quote at the offset the parser reports.
+ * - A value starting with `*` (`title: *Draft* spec`) is an alias to an
+ *   anchor that was never set. Markdown emphasis in a title is common in
+ *   agent-written frontmatter, and unlike the colon case the parser reports
+ *   no error: `toJS` throws while resolving, which would cost the whole
+ *   concept. We locate the alias nodes instead and quote their source range.
+ *
+ * Each round quotes at least one value, and a line holds at most one of each
+ * defect class, so twice the line count bounds the loop: every round makes
+ * progress and no fixable line is left behind. A fixed cap would put a silent
+ * cliff in the middle of a sloppy block — the tail would vanish exactly like
+ * the concepts this recovery exists to save.
  */
 function parseYamlBlock(text: string): Record<string, unknown> | null {
   let current = text;
-  const maxRepairs = text.split("\n").length;
+  const maxRepairs = text.split("\n").length * 2;
   for (let attempt = 0; ; attempt++) {
     const doc = parseYamlDocument(current, {
       strict: false,
       uniqueKeys: false,
       logLevel: "silent",
     });
-    const nestedMapping = doc.errors.find(
-      (error) => error.code === "BLOCK_AS_IMPLICIT_KEY",
-    );
-    if (nestedMapping !== undefined && attempt < maxRepairs) {
-      const repaired = quoteValueAt(current, nestedMapping.pos[0]);
+    if (attempt < maxRepairs) {
+      const repaired = repairOnce(current, doc);
       if (repaired !== null) {
         current = repaired;
         continue;
@@ -128,11 +139,87 @@ function parseYamlBlock(text: string): Record<string, unknown> | null {
       if (typeof parsed !== "object" || Array.isArray(parsed)) return null;
       return parsed as Record<string, unknown>;
     } catch {
-      // `toJS` still throws for a few unrecoverable nodes (an alias with no
-      // anchor). Nothing to salvage — defer the file to the agent.
+      // Some nodes are still unrecoverable. Nothing to salvage — defer the
+      // file to the agent.
       return null;
     }
   }
+}
+
+/** One round of repair, or null when nothing repairable is left. */
+function repairOnce(text: string, doc: Document.Parsed): string | null {
+  const nestedMapping = doc.errors.find(
+    (error) => error.code === "BLOCK_AS_IMPLICIT_KEY",
+  );
+  if (nestedMapping !== undefined) {
+    const repaired = quoteValueAt(text, nestedMapping.pos[0]);
+    if (repaired !== null) return repaired;
+  }
+  return quoteDanglingAliases(text, doc);
+}
+
+interface DanglingAlias {
+  readonly start: number;
+  readonly inFlow: boolean;
+}
+
+/**
+ * Quote every alias whose anchor is never defined, so `*Draft* spec` reads as
+ * the text it obviously is. A resolvable alias is left alone — anchors are
+ * valid YAML and a producer may rely on them.
+ *
+ * All of them are quoted in one round, right to left, so that the offsets of
+ * the remaining ones stay valid; the block-context quote runs to the end of
+ * the line but never past an alias already quoted to its right.
+ */
+function quoteDanglingAliases(text: string, doc: Document.Parsed): string | null {
+  const anchors = new Set<string>();
+  const aliases: DanglingAlias[] = [];
+  visit(doc, (_key, node, path) => {
+    if (node === null || typeof node !== "object") return;
+    const anchor = (node as { anchor?: string }).anchor;
+    if (anchor !== undefined) anchors.add(anchor);
+    if (!isAlias(node) || node.range === undefined || node.range === null) return;
+    const parent = [...path].reverse().find((ancestor) => isCollection(ancestor));
+    aliases.push({
+      start: node.range[0],
+      inFlow: parent !== undefined && isCollection(parent) && parent.flow === true,
+    });
+  });
+  const dangling = aliases.filter(
+    (alias) => !anchors.has(aliasSourceAt(text, alias.start)),
+  );
+  if (dangling.length === 0) return null;
+
+  let repaired = text;
+  let limit = text.length;
+  for (const alias of [...dangling].reverse()) {
+    const end = Math.min(valueEnd(repaired, alias.start, alias.inFlow), limit);
+    const value = repaired.slice(alias.start, end).trimEnd();
+    repaired =
+      repaired.slice(0, alias.start) + JSON.stringify(value) + repaired.slice(end);
+    limit = alias.start;
+  }
+  return repaired;
+}
+
+/**
+ * The alias name as written, used only to tell a resolvable alias from a
+ * dangling one. Read from the source rather than from `node.source`, which
+ * also swallows a trailing `*` of markdown emphasis.
+ */
+function aliasSourceAt(text: string, start: number): string {
+  return /^\*([^\s,\]}*]*)/.exec(text.slice(start))?.[1] ?? "";
+}
+
+/**
+ * End of the value starting at `start`: the end of the line in block context,
+ * or the next flow separator inside a `[...]` / `{...}` collection.
+ */
+function valueEnd(text: string, start: number, inFlow: boolean): number {
+  const pattern = inFlow ? /[\n,\]}]/ : /\n/;
+  const match = pattern.exec(text.slice(start));
+  return match === undefined || match === null ? text.length : start + match.index;
 }
 
 /**
