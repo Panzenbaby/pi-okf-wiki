@@ -234,7 +234,7 @@ export function extractCitations(body: string): ExtractedCitations | null {
     }
     const url = BARE_URL_RE.exec(text);
     if (url !== null) {
-      entries.push({ resource: url[1]!, title: undefined });
+      entries.push({ resource: trimSentencePunctuation(url[1]!), title: undefined });
       continue;
     }
     // Prose-only citation: keep it as a scope-descriptor resource (§5.1
@@ -252,14 +252,39 @@ export function extractCitations(body: string): ExtractedCitations | null {
   return { entries, cleanedBody: cleaned };
 }
 
+/**
+ * Strip punctuation that ends the surrounding sentence rather than the URL.
+ * A closing bracket is only sentence punctuation when it is unbalanced —
+ * `…/Foo_(Bar)` is a legitimate target, `(see …/foo)` is not.
+ */
+function trimSentencePunctuation(url: string): string {
+  let out = url;
+  for (;;) {
+    const trimmed = out.replace(/[.,;:!?"'»›]+$/, "");
+    const last = trimmed.slice(-1);
+    const opener = last === ")" ? "(" : last === "]" ? "[" : null;
+    if (opener === null || countChar(trimmed, opener) >= countChar(trimmed, last)) {
+      return trimmed;
+    }
+    out = trimmed.slice(0, -1);
+  }
+}
+
+function countChar(value: string, character: string): number {
+  let count = 0;
+  for (const char of value) if (char === character) count++;
+  return count;
+}
+
 /** Slug for a citation id: from its title, else the target's basename. */
 function slugForCitation(citation: Citation): string {
   const base = citation.title ?? citation.resource.split("/").pop() ?? "source";
   const slug = base
     .toLowerCase()
     .replace(/[^\p{L}\p{N}]+/gu, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 40);
+    // Truncation can cut mid-word and reintroduce an edge dash, so trim after.
+    .slice(0, 40)
+    .replace(/^-+|-+$/g, "");
   return slug === "" ? "source" : slug;
 }
 

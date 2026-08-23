@@ -169,6 +169,17 @@ describe("migrateConcept", () => {
   });
 });
 
+describe("source ids", () => {
+  it("never ends on a dash, even when truncation cuts mid-word", () => {
+    const concept = conceptOf(
+      "t/c",
+      "---\ntype: t\n---\n\n# Citations\n\n- [1] abcd efgh ijkl mnop qrst uvwx yzab cdef gh\n",
+    );
+    const sources = parseDocument(migrateConcept(concept)!).frontmatter?.sources;
+    expect(sources?.[0]?.id).toBe("abcd-efgh-ijkl-mnop-qrst-uvwx-yzab-cdef");
+  });
+});
+
 describe("extractCitations", () => {
   it("returns null when no # Citations section exists", () => {
     expect(extractCitations("# Schema\n\nstuff")).toBeNull();
@@ -192,6 +203,26 @@ describe("extractCitations", () => {
     expect(result?.entries).toEqual([
       { resource: "internal oncall tribal knowledge, no artifact", title: undefined },
       { resource: "https://e.com/s", title: "Spec" },
+    ]);
+  });
+
+  it("drops sentence punctuation after a bare URL but keeps a balanced bracket", () => {
+    const result = extractCitations(
+      [
+        "# Citations",
+        "",
+        "- [1] Siehe https://example.org/a.",
+        "- [2] Siehe https://en.wikipedia.org/wiki/Foo_(Bar)",
+        "- [3] Siehe https://en.wikipedia.org/wiki/Foo_(Bar).",
+        "- [4] Siehe (https://example.org/b), Absatz 2",
+        "",
+      ].join("\n"),
+    );
+    expect(result?.entries.map((entry) => entry.resource)).toEqual([
+      "https://example.org/a",
+      "https://en.wikipedia.org/wiki/Foo_(Bar)",
+      "https://en.wikipedia.org/wiki/Foo_(Bar)",
+      "https://example.org/b",
     ]);
   });
 
