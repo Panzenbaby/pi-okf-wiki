@@ -1,24 +1,30 @@
-// Minimal YAML frontmatter parser for the OKF subset.
-// Handles `key: value`, `key: [a, b, c]` (flow list), quoted strings, inline
-// comments, AND block-list syntax (`key:\n  - a\n  - b`) for the list-valued
-// OKF fields (`tags`, `supersedes`). Scalar tolerance: a bare scalar value
-// for a list field (e.g. `tags: foo`) is wrapped to a single-element list so
-// a producer who forgets the brackets does not silently lose data (§9
-// permissive consumption).
+// YAML frontmatter parsing and serialization for OKF v0.2 concepts.
 //
-// Limitations (documented, by design — see §2.3 design note): multi-line
-// scalar values, nested maps, and block lists for producer-defined keys
-// outside `tags`/`supersedes` are NOT supported; such lines are silently
-// dropped rather than rejected. Conformance-critical fields (§4.1) are all
-// scalars or flat lists, so the subset suffices for OKF v0.1 conformance.
-// No external dependency — sufficient for classification and index generation.
+// v0.2 made nested structures first-class (`generated: { by, at }`, `sources`
+// as a list of maps, `verified` as list-or-bare-mapping — §5), which is beyond
+// the hand-rolled scalar/flat-list subset that sufficed for v0.1. We therefore
+// parse with the `yaml` package (YAML 1.2 core schema: timestamps stay
+// strings, no implicit date coercion) and keep the permissive-consumption
+// posture of §11 in the typed view:
+//
+// - Unknown keys are preserved verbatim in `raw` (round-tripping, §4.1).
+// - A bare scalar for a list-valued field (`tags: foo`) is wrapped to a
+//   one-element list — a forgotten bracket never silently loses data.
+// - A bare `verified: { by, at }` mapping is normalized to a one-element
+//   list (§5.2 consumers MUST).
+// - Scalar list items that YAML types as numbers/booleans (`tags: [2024]`)
+//   are coerced back to strings.
+// - A YAML syntax error yields `frontmatter: null` — the caller treats the
+//   document as non-conformant (deferred to the agent) instead of crashing.
+//
+// The legacy v0.1 `timestamp` key is still surfaced so consumers can fall
+// back to it when `generated` is absent (§13.1).
 
-import type { Frontmatter } from "./types.ts";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+
+import type { ActorEvent, Frontmatter, SourceEntry } from "./types.ts";
 
 const FENCE = "---";
-
-/** Frontmatter keys whose value is a list and therefore may be written as a YAML block sequence. */
-const LIST_KEYS = new Set(["tags", "supersedes"]);
 
 export interface ParsedDocument {
   readonly frontmatter: Frontmatter | null;
@@ -44,80 +50,41 @@ export function parseDocument(content: string): ParsedDocument {
     return { frontmatter: null, body: content };
   }
   const body = lines.slice(i + 1).join("\n");
-  return { frontmatter: toFrontmatter(parseYamlSubset(fmLines)), body };
+  const raw = parseYamlBlock(fmLines.join("\n"));
+  if (raw === null) {
+    // Malformed YAML: not a crash, not a rejection — the document is simply
+    // not conformant yet (§11 permissive consumption; the classifier defers
+    // such files to the agent for repair).
+    return { frontmatter: null, body };
+  }
+  return { frontmatter: toFrontmatter(raw), body };
 }
 
-function parseYamlSubset(lines: string[]): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
-  // When non-null, we are inside a block list for this key; subsequent
-  // indented `- item` lines append to it until a non-list line ends the block.
-  let pendingListKey: string | null = null;
-  for (const line of lines) {
-    if (pendingListKey !== null) {
-      const isIndented = line.startsWith(" ") || line.startsWith("\t");
-      const trimmed = line.trim();
-      // An indented `- item` line appends to the pending block list.
-      if (isIndented && trimmed.startsWith("-")) {
-        let item = trimmed.slice(1).trim();
-        // Strip inline ` #…` comments exactly like the flow-list path
-        // (parseValue) does, so `  - foo # note` yields `foo`, not
-        // `foo # note`. Only for unquoted values, matching parseValue.
-        if (!item.startsWith('"') && !item.startsWith("'")) {
-          const commentIndex = item.indexOf(" #");
-          if (commentIndex !== -1) item = item.slice(0, commentIndex).trim();
-        }
-        item = unquote(item);
-        const existing = result[pendingListKey];
-        if (Array.isArray(existing)) existing.push(item);
-        else result[pendingListKey] = [item];
-        continue;
-      }
-      // Blank lines and comments are tolerated inside a block sequence.
-      if (trimmed === "" || trimmed.startsWith("#")) continue;
-      // Anything else ends the block list and falls through to key parsing.
-      pendingListKey = null;
-    }
-    const trimmed = line.trim();
-    if (trimmed === "" || trimmed.startsWith("#")) continue;
-    const idx = line.indexOf(":");
-    if (idx === -1) continue;
-    const key = line.slice(0, idx).trim();
-    if (key === "") continue;
-    const valueRaw = line.slice(idx + 1).trim();
-    if (valueRaw === "" && LIST_KEYS.has(key)) {
-      // Start a block list; collect subsequent indented `- item` lines.
-      result[key] = [];
-      pendingListKey = key;
-      continue;
-    }
-    result[key] = parseValue(valueRaw);
-  }
-  return result;
+/**
+ * Serialize frontmatter (as a raw key/value record) plus a body back into a
+ * concept document. Unknown keys round-trip untouched (§4.1); key order
+ * follows the record's insertion order. Used by deterministic writers (e.g.
+ * a v0.1→v0.2 migration) — agent-authored concepts are written by the agent.
+ */
+export function serializeDocument(
+  raw: Readonly<Record<string, unknown>>,
+  body: string,
+): string {
+  const yaml = stringifyYaml(raw).trimEnd();
+  const trimmedBody = body.replace(/^\n+/, "");
+  return `${FENCE}\n${yaml}\n${FENCE}\n\n${trimmedBody}`;
 }
 
-function parseValue(raw: string): unknown {
-  let value = raw.trim();
-  if (value === "") return "";
-  if (!value.startsWith('"') && !value.startsWith("'")) {
-    const commentIndex = value.indexOf(" #");
-    if (commentIndex !== -1) value = value.slice(0, commentIndex).trim();
+/** Parse a YAML block to a plain record; null on syntax error or non-map. */
+function parseYamlBlock(text: string): Record<string, unknown> | null {
+  try {
+    const parsed: unknown = parseYaml(text);
+    if (parsed === null || parsed === undefined) return {};
+    if (typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    return parsed as Record<string, unknown>;
+  } catch {
+    return null;
   }
-  if (value.startsWith("[") && value.endsWith("]")) {
-    const inner = value.slice(1, -1).trim();
-    if (inner === "") return [];
-    return inner.split(",").map((part) => unquote(part.trim()));
-  }
-  return unquote(value);
-}
-
-function unquote(value: string): string {
-  if (
-    (value.startsWith('"') && value.endsWith('"')) ||
-    (value.startsWith("'") && value.endsWith("'"))
-  ) {
-    return value.slice(1, -1);
-  }
-  return value;
 }
 
 function toFrontmatter(raw: Record<string, unknown>): Frontmatter {
@@ -130,24 +97,91 @@ function toFrontmatter(raw: Record<string, unknown>): Frontmatter {
     tags: asStringList(raw["tags"]),
     status: asString(raw["status"]),
     supersedes: asStringList(raw["supersedes"]),
+    generated: asActorEvent(raw["generated"]),
+    verified: asActorEventList(raw["verified"]),
+    sources: asSourceList(raw["sources"]),
+    staleAfter: asString(raw["stale_after"]),
     raw,
   };
 }
 
 function asString(value: unknown): string | undefined {
   if (typeof value === "string" && value !== "") return value;
+  // YAML 1.2 types bare numbers/booleans; a scalar field written as one
+  // (e.g. a numeric title) is coerced rather than dropped.
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
   return undefined;
 }
 
 /**
  * Coerce a frontmatter value to a string list. Accepts a YAML flow/block
- * list (Array) OR a bare scalar string, which is wrapped to a single-element
- * list (scalar tolerance — never silently drop a forgotten-brackets value).
+ * list (Array) OR a bare scalar, which is wrapped to a single-element list
+ * (scalar tolerance — never silently drop a forgotten-brackets value).
  */
 function asStringList(value: unknown): string[] {
   if (Array.isArray(value)) {
-    return value.filter((item): item is string => typeof item === "string");
+    return value
+      .map((item) => asString(item))
+      .filter((item): item is string => item !== undefined);
   }
-  if (typeof value === "string" && value !== "") return [value];
-  return [];
+  const scalar = asString(value);
+  return scalar !== undefined ? [scalar] : [];
+}
+
+/** A `{ by, at }` mapping (§5.2); undefined for anything else. */
+function asActorEvent(value: unknown): ActorEvent | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const by = asString(record["by"]);
+  const at = asString(record["at"]);
+  if (by === undefined && at === undefined) return undefined;
+  return { by, at };
+}
+
+/**
+ * `verified` accepts a list of `{ by, at }` mappings OR a bare mapping,
+ * which consumers MUST treat as a one-element list (§5.2).
+ */
+function asActorEventList(value: unknown): ActorEvent[] {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => asActorEvent(item))
+      .filter((item): item is ActorEvent => item !== undefined);
+  }
+  const single = asActorEvent(value);
+  return single !== undefined ? [single] : [];
+}
+
+function asSourceList(value: unknown): SourceEntry[] {
+  if (!Array.isArray(value)) return [];
+  const entries: SourceEntry[] = [];
+  for (const item of value) {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) {
+      continue;
+    }
+    const record = item as Record<string, unknown>;
+    const entry: SourceEntry = {
+      id: asString(record["id"]),
+      resource: asString(record["resource"]),
+      title: asString(record["title"]),
+      author: asString(record["author"]),
+      usageCount: asNumber(record["usage_count"]),
+      lastModified: asString(record["last_modified"]),
+    };
+    // Keep entries with at least one recognized field; a fully opaque item
+    // still round-trips via `raw`, it just has no typed view.
+    if (Object.values(entry).some((field) => field !== undefined)) {
+      entries.push(entry);
+    }
+  }
+  return entries;
+}
+
+function asNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  return undefined;
 }

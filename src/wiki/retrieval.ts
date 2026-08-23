@@ -197,10 +197,49 @@ export function renderConceptForPrompt(concept: Concept): string {
     fm.tags.length > 0 ? `tags: [${fm.tags.join(", ")}]` : null,
     fm.status ? `status: ${fm.status}` : null,
     fm.supersedes.length > 0 ? `supersedes: [${fm.supersedes.join(", ")}]` : null,
+    renderGenerated(fm),
+    renderVerified(fm),
+    fm.staleAfter ? `stale_after: ${fm.staleAfter}` : null,
+    renderSources(fm),
   ]
     .filter((line): line is string => line !== null)
     .join("\n");
   return `### ${concept.conceptId}\n\n${meta}\n\n${concept.body.trim()}`;
+}
+
+/** `generated` line, falling back to the legacy v0.1 `timestamp` (§13.1). */
+function renderGenerated(fm: Frontmatter): string | null {
+  if (fm.generated) {
+    const by = fm.generated.by ?? "(unknown)";
+    const at = fm.generated.at ?? "(unknown)";
+    return `generated: by ${by} at ${at}`;
+  }
+  if (fm.timestamp) return `timestamp: ${fm.timestamp} (legacy v0.1)`;
+  return null;
+}
+
+/** Trust tier (§5.3) plus the latest verification, for the query agent. */
+function renderVerified(fm: Frontmatter): string | null {
+  if (fm.verified.length === 0) return null;
+  const humanReviewed = fm.verified.some((event) => event.by?.startsWith("human:"));
+  const tier = humanReviewed ? "human-reviewed" : "machine-confirmed";
+  const latest = fm.verified
+    .map((event) => event.at)
+    .filter((at): at is string => at !== undefined)
+    .sort()
+    .pop();
+  return `verified: ${tier}${latest ? ` (latest ${latest})` : ""}`;
+}
+
+/** Compact `sources` summary so footnote labels resolve without opening the file. */
+function renderSources(fm: Frontmatter): string | null {
+  if (fm.sources.length === 0) return null;
+  const entries = fm.sources.map((source) => {
+    const id = source.id ?? "(no id)";
+    const resource = source.resource ?? "(no resource)";
+    return `${id} -> ${resource}`;
+  });
+  return `sources: ${entries.join("; ")}`;
 }
 
 /**

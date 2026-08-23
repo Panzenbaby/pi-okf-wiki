@@ -30,6 +30,10 @@ const frontmatter = (
   timestamp: undefined,
   status: undefined,
   supersedes: [],
+  generated: undefined,
+  verified: [],
+  sources: [],
+  staleAfter: undefined,
   raw: {},
   ...overrides,
 });
@@ -191,7 +195,7 @@ describe("generateRootIndexMd", () => {
       [concept("tables/orders")],
       computeIndexDirs([concept("tables/orders")]),
     );
-    expect(markdown.startsWith('---\nokf_version: "0.1"\n---\n')).toBe(true);
+    expect(markdown.startsWith('---\nokf_version: "0.2"\n---\n')).toBe(true);
     expect(markdown).toContain("# Wiki Index");
   });
 
@@ -310,7 +314,7 @@ describe("writeAllIndexMd (filesystem)", () => {
     expect(result.success).toBe(true);
 
     const rootContent = await readFile(join(wikiRoot, "index.md"), "utf8");
-    expect(rootContent.startsWith('---\nokf_version: "0.1"\n---\n')).toBe(true);
+    expect(rootContent.startsWith('---\nokf_version: "0.2"\n---\n')).toBe(true);
     const subContent = await readFile(join(wikiRoot, "tables", "index.md"), "utf8");
     expect(subContent.startsWith("---")).toBe(false);
   });

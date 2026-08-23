@@ -22,6 +22,10 @@ const frontmatter = (overrides: Partial<Frontmatter> = {}): Frontmatter => ({
   timestamp: undefined,
   status: undefined,
   supersedes: [],
+  generated: undefined,
+  verified: [],
+  sources: [],
+  staleAfter: undefined,
   raw: {},
   ...overrides,
 });
