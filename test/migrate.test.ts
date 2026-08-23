@@ -117,6 +117,40 @@ describe("migrateConcept", () => {
     ]);
   });
 
+  it("maps the legacy status values onto the §5.4 lifecycle", () => {
+    const current = conceptOf(
+      "t/a",
+      "---\ntype: t\nstatus: current\n---\n\nbody\n",
+    );
+    expect(parseDocument(migrateConcept(current)!).frontmatter?.status).toBe("stable");
+
+    const superseded = conceptOf(
+      "t/b",
+      "---\ntype: t\nstatus: Superseded\nsupersedes: [/t/a.md]\n---\n\nbody\n",
+    );
+    const migrated = parseDocument(migrateConcept(superseded)!);
+    expect(migrated.frontmatter?.status).toBe("deprecated");
+    // `supersedes` is a producer extension (§4.1) and stays untouched.
+    expect(migrated.frontmatter?.supersedes).toEqual(["/t/a.md"]);
+  });
+
+  it("leaves a status that is already §5.4 alone", () => {
+    for (const status of ["draft", "stable", "deprecated"]) {
+      const concept = conceptOf("t/c", `---\ntype: t\nstatus: ${status}\n---\n\nbody\n`);
+      expect(migrateConcept(concept)).toBeNull();
+    }
+  });
+
+  it("does not invent a status for a concept that has none", () => {
+    const concept = conceptOf(
+      "t/c",
+      "---\ntype: t\ntimestamp: 2026-07-03T00:00:00Z\n---\n\nbody\n",
+    );
+    const migrated = parseDocument(migrateConcept(concept)!);
+    expect(migrated.frontmatter?.status).toBeUndefined();
+    expect(migrated.frontmatter?.raw["status"]).toBeUndefined();
+  });
+
   it("returns null for a concept that is already v0.2", () => {
     const concept = conceptOf(
       "t/c",

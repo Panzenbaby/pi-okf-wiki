@@ -65,11 +65,15 @@ const OKF_RULES = `OKF (Open Knowledge Format, v0.2) rules for a concept file:
 - Temporal precedence: when values conflict, prefer the one with the latest
   source date (\`sources[].last_modified\`, the source's own \`generated.at\` or
   legacy \`timestamp\`, or a "neueste Version" / "latest" marker) as canonical;
-  mark older values as superseded. Use the producer-defined frontmatter fields
-  \`status: current | superseded\` and \`supersedes: [/path/to/older.md]\` (a
-  bundle-relative path LIST, so one concept can supersede several older ones)
-  to make the precedence graph explicit. Absent dates => keep the conflict
-  unresolved and label all values as "unverified".`;
+  mark older values as superseded. Make the precedence graph explicit with
+  \`status\` (§5.4: \`draft\` | \`stable\` | \`deprecated\`; absent means
+  \`stable\`) plus the producer-defined \`supersedes: [/path/to/older.md]\` (a
+  bundle-relative path LIST, so one concept can supersede several older ones):
+  the superseding concept lists the older ones in \`supersedes\`, and a concept
+  that is no longer current gets \`status: deprecated\`. Do NOT write the legacy
+  values \`current\` or \`superseded\` into \`status\` — v0.2 standardizes that
+  field, and a consumer reads any other value as \`stable\`. Absent dates =>
+  keep the conflict unresolved and label all values as "unverified".`;
 
 export interface UpdatePromptInput {
   readonly inputFiles: ReadonlyArray<{
@@ -173,7 +177,7 @@ ${input.wikiDir}/<concept-id>.md:
 - Frontmatter: type, title, description, tags (flow list \`[a, b]\`),
   \`generated: { by: pi-okf-wiki/<your model id>, at: <ISO 8601> }\` (set \`at\`
   to now), and the \`sources\` list (one entry per source in the cluster).
-  Optional: \`status: current | superseded\` and
+  Optional: \`status\` (\`draft\` | \`stable\` | \`deprecated\`, §5.4) and
   \`supersedes: [/path/to/older.md]\` (bundle-relative path list) to mark the
   precedence graph.
 - Body: structured markdown. Extract schemas and examples where present, and
@@ -192,10 +196,10 @@ ${input.wikiDir}/<concept-id>.md:
       description and in the # Schema. Mark superseded values as such.
     * If no source is clearly newer, leave ALL conflicting values in the table
       labelled "unverified" and do not declare a canonical one.
-  Use the producer-defined frontmatter fields \`status\`
-  (\`current\` / \`superseded\`) and \`supersedes: [/path/to/older.md]\` (a
-  bundle-relative path LIST) to make the precedence graph explicit when
-  applicable.
+  Use \`status\` (\`draft\` | \`stable\` | \`deprecated\`, §5.4 — never the legacy
+  \`current\` / \`superseded\`) and the producer-defined
+  \`supersedes: [/path/to/older.md]\` (a bundle-relative path LIST) to make the
+  precedence graph explicit when applicable.
 
 STEP 3 — ONLY AFTER the concept file is written successfully, move EACH original
 from input/<relativePath> to the EXACT archive path listed for that file
@@ -257,10 +261,10 @@ Conflict & completeness rules (IMPORTANT):
   # Versions table) when its sources disagree. Before answering, OPEN the
   concept and read the whole body — do not answer from a snippet alone.
 - When the concept declares a CANONICAL value (via temporal precedence on
-  \`generated.at\` / legacy \`timestamp\`, \`status: current\`, or an explicit
-  "canonical" statement), answer with the canonical value, but ALSO note that
-  other sources disagree (e.g. "grün (kanonisch laut neuester Version);
-  ältere Quelle nennt blau").
+  \`generated.at\` / legacy \`timestamp\`, a \`status\` that is not \`deprecated\`,
+  or an explicit "canonical" statement), answer with the canonical value, but
+  ALSO note that other sources disagree (e.g. "grün (kanonisch laut neuester
+  Version); ältere Quelle nennt blau").
 
 Trust & freshness rules (OKF v0.2):
 - Trust tier from \`verified\` (§5.3): no \`verified\` => unverified; verified
@@ -268,7 +272,10 @@ Trust & freshness rules (OKF v0.2):
   \`human:<id>\` actor => human-reviewed. When concepts conflict, prefer the
   higher tier and the fresher \`generated.at\`; when you rely on an unverified
   concept for a substantive claim, say so.
-- When \`stale_after\` lies in the past or \`status\` is \`deprecated\`, still
+- \`status\` (§5.4) is \`draft\` | \`stable\` | \`deprecated\`; absent means
+  \`stable\`. Older bundles may still carry the legacy values \`current\` (read
+  it as \`stable\`) and \`superseded\` (read it as \`deprecated\`).
+- When \`stale_after\` lies in the past or the concept is deprecated, still
   answer if it is the best available knowledge, but flag it explicitly as
   possibly stale/deprecated.
 - \`sources\` entries and \`[^id]\` footnotes tell you which source backs which

@@ -22,13 +22,16 @@ export function err<T>(message: string, extras: Partial<AppError> = {}): Result<
 /**
  * Parsed YAML frontmatter of a concept document.
  *
- * `status` and `supersedes` are producer-defined OKF extensions (§4.1), not
- * registered by the spec. They are typed here (rather than left only in `raw`)
- * so the precedence graph is first-class: `renderConceptForPrompt` surfaces
- * them to the query agent without it having to open the file. `status` stays
- * an open string (the prompt convention is `current` | `superseded`, but
- * producers MAY use other values — §11 forbids rejecting them); `supersedes`
- * is a path list so a concept can supersede several older ones (merge).
+ * `status` is the spec's lifecycle field (§5.4: `draft` | `stable` |
+ * `deprecated`, absent meaning `stable`). It stays an open string because
+ * producers MAY use other values and §11 forbids rejecting them — older
+ * bundles of ours carry the pre-v0.2 values `current` / `superseded`.
+ *
+ * `supersedes` is a producer-defined OKF extension (§4.1), not registered by
+ * the spec. Both are typed here (rather than left only in `raw`) so the
+ * precedence graph is first-class: `renderConceptForPrompt` surfaces them to
+ * the query agent without it having to open the file. `supersedes` is a path
+ * list so a concept can supersede several older ones (merge).
  */
 export interface Frontmatter {
   readonly type: string | undefined;
@@ -38,7 +41,7 @@ export interface Frontmatter {
   readonly tags: readonly string[];
   /** LEGACY (OKF v0.1): superseded by `generated.at` (§13.1). Read-only fallback. */
   readonly timestamp: string | undefined;
-  /** Producer-defined (§4.1): `current` | `superseded` by convention. Open string. */
+  /** OKF v0.2 lifecycle (§5.4): `draft` | `stable` | `deprecated`. Open string. */
   readonly status: string | undefined;
   /** Producer-defined (§4.1): bundle-relative paths to concepts this one supersedes. */
   readonly supersedes: readonly string[];

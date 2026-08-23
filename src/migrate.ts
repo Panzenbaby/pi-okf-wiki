@@ -14,6 +14,13 @@
 //     writer's model is unknown for old concepts, so the producer/version
 //     actor `pi-okf-wiki/legacy` is used (§7). When `generated` already
 //     exists, the redundant `timestamp` is simply dropped.
+//   - A legacy `status` value becomes its §5.4 counterpart: `current` ->
+//     `stable`, `superseded` -> `deprecated`. v0.1 left `status` to the
+//     producer, so this bundle used it for the supersession graph; v0.2
+//     standardizes the field, and a consumer reads any unknown value as
+//     `stable` — which would silently promote a superseded concept back to
+//     current. `supersedes` stays a producer extension (§4.1) and is left
+//     alone.
 //   - Each `# Citations` list entry becomes a `sources` entry
 //     `{ id, resource, title }` (§5.1) and the body section is removed.
 //     Existing `sources` entries are kept; a citation whose resource is
@@ -34,6 +41,18 @@ import { appendLogMd, loadAllConcepts, wikiPaths, writeAllIndexMd } from "./wiki
 
 /** Actor (§7) recorded as `generated.by` for pre-v0.2 content of unknown origin. */
 export const LEGACY_ACTOR = "pi-okf-wiki/legacy";
+
+/** Pre-v0.2 `status` values and their §5.4 counterparts. */
+const LEGACY_STATUS: Readonly<Record<string, string>> = {
+  current: "stable",
+  superseded: "deprecated",
+};
+
+/** The §5.4 value for a legacy `status`, or undefined when it needs no change. */
+function migratedStatus(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  return LEGACY_STATUS[value.trim().toLowerCase()];
+}
 
 export interface MigrationReport {
   /** Concept ids rewritten to v0.2, sorted. */
@@ -85,13 +104,16 @@ export async function migrateWiki(
 
 /**
  * Rewrite one concept to v0.2, or return null when it is already current
- * (no legacy `timestamp`, no body `# Citations` section).
+ * (no legacy `timestamp`, no legacy `status`, no body `# Citations` section).
  */
 export function migrateConcept(concept: Concept): string | null {
   const raw = concept.frontmatter.raw;
   const hasLegacyTimestamp = raw["timestamp"] !== undefined;
+  const nextStatus = migratedStatus(raw["status"]);
   const citations = extractCitations(concept.body);
-  if (!hasLegacyTimestamp && citations === null) return null;
+  if (!hasLegacyTimestamp && citations === null && nextStatus === undefined) {
+    return null;
+  }
 
   // Rebuild the record in original key order, replacing `timestamp` in place
   // by `generated` (or dropping it when `generated` already exists).
@@ -101,6 +123,10 @@ export function migrateConcept(concept: Concept): string | null {
       if (raw["generated"] === undefined) {
         next["generated"] = { by: LEGACY_ACTOR, at: String(value) };
       }
+      continue;
+    }
+    if (key === "status" && nextStatus !== undefined) {
+      next[key] = nextStatus;
       continue;
     }
     next[key] = value;

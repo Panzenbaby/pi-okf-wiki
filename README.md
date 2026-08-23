@@ -15,7 +15,7 @@ the concepts that back it.
 | `/wiki-update` | Ingest new documents from `input/` into the `wiki/` bundle, archive the originals, regenerate `index.md` / `log.md`, and show a summary. |
 | `/wiki-query <question>` | Answer a question against the wiki, with every claim cited to a `wiki/<concept-id>.md` source. |
 | `/wiki-remove <path>` | Move a concept (or a whole directory of concepts) into `wiki/trash/`, redirect links that pointed at it, and regenerate `index.md` / `log.md`. |
-| `/wiki-migrate` | Rewrite legacy OKF v0.1 concepts to v0.2: `timestamp` becomes `generated: { by, at }` and the body `# Citations` list is lifted into the `sources` frontmatter. Deterministic (no agent turn); already-current concepts are untouched. |
+| `/wiki-migrate` | Rewrite legacy OKF v0.1 concepts to v0.2: `timestamp` becomes `generated: { by, at }`, the body `# Citations` list is lifted into the `sources` frontmatter, and the pre-v0.2 `status` values `current` / `superseded` become `stable` / `deprecated`. Deterministic (no agent turn); already-current concepts are untouched. |
 
 ## Folder layout
 
@@ -207,6 +207,11 @@ Instead it records the disagreement inside the single concept body:
   and `# Schema`; older values are marked superseded. If no source is clearly
   newer, all conflicting values stay in the table labelled **unverified** and
   no canonical value is declared.
+
+The precedence graph across concepts uses `status` (the OKF §5.4 lifecycle:
+`draft` | `stable` | `deprecated`, absent meaning `stable`) together with the
+producer-defined `supersedes: [/path/to/older.md]`. A concept that is no longer
+current is `deprecated`; the one that replaced it lists it in `supersedes`.
 
 ## How `/wiki-query` works
 
