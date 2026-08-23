@@ -37,6 +37,7 @@
 import { ok, type Concept, type Result } from "./types.ts";
 import { serializeDocument } from "./frontmatter.ts";
 import { writeTextFile } from "./files.ts";
+import { proseLineMask } from "./links.ts";
 import { appendLogMd, loadAllConcepts, wikiPaths, writeAllIndexMd } from "./wiki.ts";
 
 /** Actor (§7) recorded as `generated.by` for pre-v0.2 content of unknown origin. */
@@ -184,7 +185,8 @@ interface ExtractedCitations {
 
 const CITATIONS_HEADING_RE = /^#{1,6}\s+Citations\s*$/i;
 const MARKDOWN_LINK_RE = /\[([^\]]*)\]\(\s*(<[^>]*>|[^()\s]+)\s*\)/;
-const LIST_ITEM_RE = /^\s*(?:[-*+]|\d+[.)]|\[\d+\])\s+(.*)$/;
+const LIST_ITEM_RE = /^\s*(?:[-*+]|\d+[.)])?\s*(?:\[\d+\]\s+)?(.*)$/;
+const BULLET_RE = /^\s*(?:[-*+]|\d+[.)]|\[\d+\])\s/;
 const BARE_URL_RE = /(https?:\/\/\S+)/;
 
 /**
@@ -192,24 +194,34 @@ const BARE_URL_RE = /(https?:\/\/\S+)/;
  * with the whole section removed. Returns null when no section exists. A
  * section that exists but yields no parseable entries is still removed (it
  * carried no information a v0.2 consumer could use).
+ *
+ * Headings and list items inside a fenced code block are ignored throughout:
+ * a concept that documents the v0.1 citation format shows exactly these lines
+ * as an example, and cutting into the fence would leave it unterminated and
+ * render the rest of the document as code.
  */
 export function extractCitations(body: string): ExtractedCitations | null {
   const lines = body.split("\n");
-  const start = lines.findIndex((line) => CITATIONS_HEADING_RE.test(line));
+  const isProse = proseLineMask(body);
+  const start = lines.findIndex(
+    (line, index) => isProse[index] === true && CITATIONS_HEADING_RE.test(line),
+  );
   if (start === -1) return null;
   let end = lines.length;
   for (let i = start + 1; i < lines.length; i++) {
-    if (/^#{1,6}\s/.test(lines[i]!)) {
+    if (isProse[i] === true && /^#{1,6}\s/.test(lines[i]!)) {
       end = i;
       break;
     }
   }
 
   const entries: Citation[] = [];
-  for (const line of lines.slice(start + 1, end)) {
-    const item = LIST_ITEM_RE.exec(line);
-    if (item === null) continue;
-    const text = item[1]!.trim();
+  for (let i = start + 1; i < end; i++) {
+    const line = lines[i]!;
+    if (isProse[i] !== true || !BULLET_RE.test(line)) continue;
+    // The v0.1 prompt asked for numbered citations, so a `[3]` marker after
+    // the bullet is the norm rather than part of the citation itself.
+    const text = LIST_ITEM_RE.exec(line)![1]!.trim();
     const link = MARKDOWN_LINK_RE.exec(text);
     if (link !== null) {
       let target = link[2]!;

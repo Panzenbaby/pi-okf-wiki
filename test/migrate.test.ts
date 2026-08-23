@@ -184,6 +184,61 @@ describe("extractCitations", () => {
       "interview with the ops team",
     ]);
   });
+
+  it("strips the [n] marker that follows a bullet (the v0.1 normal form)", () => {
+    const result = extractCitations(
+      "# Citations\n\n- [3] internal oncall tribal knowledge, no artifact\n- [1] [Spec](https://e.com/s)\n",
+    );
+    expect(result?.entries).toEqual([
+      { resource: "internal oncall tribal knowledge, no artifact", title: undefined },
+      { resource: "https://e.com/s", title: "Spec" },
+    ]);
+  });
+
+  it("ignores a # Citations example inside a code fence", () => {
+    const body = [
+      "# Beispiel",
+      "",
+      "```markdown",
+      "# Citations",
+      "",
+      "- [x](https://a.example)",
+      "```",
+      "",
+      "# Schema",
+      "",
+      "danach",
+      "",
+    ].join("\n");
+    expect(extractCitations(body)).toBeNull();
+  });
+
+  it("neither ends the section nor collects entries on fenced lines", () => {
+    const body = [
+      "# Citations",
+      "",
+      "- [1] [a](https://a.example)",
+      "",
+      "```markdown",
+      "# Sources",
+      "",
+      "- [2] [b](https://b.example)",
+      "```",
+      "",
+      "- [3] [c](https://c.example)",
+      "",
+      "# Schema",
+      "",
+      "danach",
+      "",
+    ].join("\n");
+    const result = extractCitations(body);
+    expect(result?.entries.map((entry) => entry.resource)).toEqual([
+      "https://a.example",
+      "https://c.example",
+    ]);
+    expect(result?.cleanedBody).toBe("\n# Schema\n\ndanach\n");
+  });
 });
 
 describe("migrateWiki", () => {

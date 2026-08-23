@@ -127,31 +127,38 @@ const INLINE_LINK_RE =
 const REFERENCE_DEF_RE = /^([ \t]{0,3}\[[^\]\n]+\]:[ \t]*)(<[^>]*>|\S+)/;
 
 /**
- * Apply `transform` to every line that is NOT inside a fenced code block.
+ * Per line of `body`, whether it is prose — i.e. neither a fence marker nor
+ * inside a fenced code block.
  *
- * Concept bodies routinely contain markdown examples in ``` fences; rewriting
- * a link inside one would corrupt documentation that only *shows* a link
- * rather than making one.
+ * Concept bodies routinely contain markdown examples in ``` fences; treating
+ * a line inside one as prose would corrupt documentation that only *shows*
+ * a link or a heading rather than making one.
  */
-function mapProseLines(body: string, transform: (line: string) => string): string {
+export function proseLineMask(body: string): readonly boolean[] {
   let fence: string | null = null;
+  return body.split("\n").map((line) => {
+    const opener = /^\s*(`{3,}|~{3,})/.exec(line);
+    if (fence !== null) {
+      // Only a fence of the same character (and at least as long) closes it.
+      if (opener !== null && opener[1]!.startsWith(fence[0]!) && opener[1]!.length >= fence.length) {
+        fence = null;
+      }
+      return false;
+    }
+    if (opener !== null) {
+      fence = opener[1]!;
+      return false;
+    }
+    return true;
+  });
+}
+
+/** Apply `transform` to every prose line, leaving fenced code untouched. */
+function mapProseLines(body: string, transform: (line: string) => string): string {
+  const isProse = proseLineMask(body);
   return body
     .split("\n")
-    .map((line) => {
-      const opener = /^\s*(`{3,}|~{3,})/.exec(line);
-      if (fence !== null) {
-        // Only a fence of the same character (and at least as long) closes it.
-        if (opener !== null && opener[1]!.startsWith(fence[0]!) && opener[1]!.length >= fence.length) {
-          fence = null;
-        }
-        return line;
-      }
-      if (opener !== null) {
-        fence = opener[1]!;
-        return line;
-      }
-      return transform(line);
-    })
+    .map((line, index) => (isProse[index] === true ? transform(line) : line))
     .join("\n");
 }
 
