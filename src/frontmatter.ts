@@ -14,13 +14,18 @@
 //   list (§5.2 consumers MUST).
 // - Scalar list items that YAML types as numbers/booleans (`tags: [2024]`)
 //   are coerced back to strings.
-// - A YAML syntax error yields `frontmatter: null` — the caller treats the
-//   document as non-conformant (deferred to the agent) instead of crashing.
+// - A YAML syntax error does NOT discard the document. We parse with
+//   `parseDocument`, which collects errors instead of throwing and still
+//   yields the keys it could recover, and read that partial result. A file
+//   whose `title` holds an unquoted colon keeps its `type` and every other
+//   key; only the offending value degrades to `undefined`. Dropping the
+//   whole concept would remove it from `index.md` and from retrieval — the
+//   silent rejection §11 forbids.
 //
 // The legacy v0.1 `timestamp` key is still surfaced so consumers can fall
 // back to it when `generated` is absent (§13.1).
 
-import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { parseDocument as parseYamlDocument, stringify as stringifyYaml } from "yaml";
 
 import type { ActorEvent, Frontmatter, SourceEntry } from "./types.ts";
 
@@ -52,9 +57,9 @@ export function parseDocument(content: string): ParsedDocument {
   const body = lines.slice(i + 1).join("\n");
   const raw = parseYamlBlock(fmLines.join("\n"));
   if (raw === null) {
-    // Malformed YAML: not a crash, not a rejection — the document is simply
-    // not conformant yet (§11 permissive consumption; the classifier defers
-    // such files to the agent for repair).
+    // Nothing recoverable at all (e.g. the block is a list, not a mapping).
+    // Not a crash, not a rejection — the document is simply not conformant
+    // yet (§11; the classifier defers such files to the agent for repair).
     return { frontmatter: null, body };
   }
   return { frontmatter: toFrontmatter(raw), body };
@@ -75,16 +80,69 @@ export function serializeDocument(
   return `${FENCE}\n${yaml}\n${FENCE}\n\n${trimmedBody}`;
 }
 
-/** Parse a YAML block to a plain record; null on syntax error or non-map. */
+/** Cap on repair rounds, so a pathological block cannot spin. */
+const MAX_REPAIRS = 10;
+
+/**
+ * Parse a YAML block to a plain record, recovering as much as possible from a
+ * malformed block; null only when nothing usable remains (the block is a list
+ * or a scalar, or a node cannot be materialized at all).
+ *
+ * `parseDocument` collects syntax errors instead of throwing, so a bad line
+ * costs its own value rather than the whole concept (§11). `uniqueKeys` is off
+ * because a duplicate key is a producer mistake, not grounds for rejection;
+ * `strict` is off so recoverable whitespace and indentation slips stay
+ * warnings.
+ *
+ * One error class gets a targeted repair: an unquoted colon in a value
+ * (`title: Orders: the table`) is read as a nested mapping, which swallows
+ * every following key into it — losing far more than the offending line. It is
+ * also the most likely defect in agent-written frontmatter. We quote the value
+ * at the offset the parser itself reports and re-parse with the same parser,
+ * so this stays one YAML implementation, not a hand-rolled fallback.
+ */
 function parseYamlBlock(text: string): Record<string, unknown> | null {
-  try {
-    const parsed: unknown = parseYaml(text);
-    if (parsed === null || parsed === undefined) return {};
-    if (typeof parsed !== "object" || Array.isArray(parsed)) return null;
-    return parsed as Record<string, unknown>;
-  } catch {
-    return null;
+  let current = text;
+  for (let attempt = 0; ; attempt++) {
+    const doc = parseYamlDocument(current, {
+      strict: false,
+      uniqueKeys: false,
+      logLevel: "silent",
+    });
+    const nestedMapping = doc.errors.find(
+      (error) => error.code === "BLOCK_AS_IMPLICIT_KEY",
+    );
+    if (nestedMapping !== undefined && attempt < MAX_REPAIRS) {
+      const repaired = quoteValueAt(current, nestedMapping.pos[0]);
+      if (repaired !== null) {
+        current = repaired;
+        continue;
+      }
+    }
+    try {
+      const parsed: unknown = doc.toJS();
+      if (parsed === null || parsed === undefined) return {};
+      if (typeof parsed !== "object" || Array.isArray(parsed)) return null;
+      return parsed as Record<string, unknown>;
+    } catch {
+      // `toJS` still throws for a few unrecoverable nodes (an alias with no
+      // anchor). Nothing to salvage — defer the file to the agent.
+      return null;
+    }
   }
+}
+
+/**
+ * Quote the scalar running from `offset` to the end of its line, so a value
+ * containing `: ` stops reading as a nested mapping. Returns null when there
+ * is nothing to quote or the value is already quoted.
+ */
+function quoteValueAt(text: string, offset: number): string | null {
+  const lineEnd = text.indexOf("\n", offset);
+  const end = lineEnd === -1 ? text.length : lineEnd;
+  const value = text.slice(offset, end).trimEnd();
+  if (value === "" || value.startsWith('"') || value.startsWith("'")) return null;
+  return text.slice(0, offset) + JSON.stringify(value) + text.slice(end);
 }
 
 function toFrontmatter(raw: Record<string, unknown>): Frontmatter {

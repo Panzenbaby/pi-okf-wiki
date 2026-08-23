@@ -84,8 +84,42 @@ describe("parseDocument frontmatter", () => {
     expect(doc.frontmatter?.status).toBeUndefined();
   });
 
-  it("returns null frontmatter on malformed YAML (deferred, not crashed)", () => {
-    const doc = parseDocument("---\ntype: [unclosed\n---\n\nbody\n");
+  it("reads an unquoted colon in a value without losing the following keys", () => {
+    // Read as YAML this is a nested mapping that swallows every later key.
+    // A syntax error must not cost the whole concept either: it would vanish
+    // from index.md and from retrieval (§11).
+    const doc = parseDocument(
+      "---\ntype: note\ntitle: Orders: the table\ndescription: One row per order.\ntags: [sales]\n---\n\nbody\n",
+    );
+    expect(doc.frontmatter?.type).toBe("note");
+    expect(doc.frontmatter?.title).toBe("Orders: the table");
+    expect(doc.frontmatter?.description).toBe("One row per order.");
+    expect(doc.frontmatter?.tags).toEqual(["sales"]);
+    expect(doc.body.trim()).toBe("body");
+  });
+
+  it("repairs several unquoted colons across several lines", () => {
+    const doc = parseDocument(
+      "---\ntype: note\ntitle: Playbook: incident: response\ndescription: Steps: triage\n---\n\nbody\n",
+    );
+    expect(doc.frontmatter?.title).toBe("Playbook: incident: response");
+    expect(doc.frontmatter?.description).toBe("Steps: triage");
+  });
+
+  it("tolerates tab indentation, duplicate keys, and an unclosed flow list", () => {
+    const tabbed = parseDocument("---\ntype: note\ntags:\n\t- sales\n---\n\nbody\n");
+    expect(tabbed.frontmatter?.type).toBe("note");
+    expect(tabbed.frontmatter?.tags).toEqual(["sales"]);
+
+    const duplicate = parseDocument("---\ntype: note\ntitle: a\ntitle: b\n---\n\nbody\n");
+    expect(duplicate.frontmatter?.type).toBe("note");
+
+    const unclosed = parseDocument("---\ntype: [unclosed\ntitle: Orders\n---\n\nbody\n");
+    expect(unclosed.frontmatter?.title).toBe("Orders");
+  });
+
+  it("returns null frontmatter only when nothing is recoverable", () => {
+    const doc = parseDocument("---\n- a\n- b\n---\n\nbody\n");
     expect(doc.frontmatter).toBeNull();
     expect(doc.body.trim()).toBe("body");
   });
