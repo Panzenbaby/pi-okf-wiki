@@ -306,6 +306,51 @@ describe("planRemoval", () => {
     ]);
   });
 
+  it("announces a concept that references the target only via sources[].resource", async () => {
+    await writeConcept("project/foo.md", "type: note", "# Foo");
+    await writeConcept(
+      "zitierer.md",
+      "type: note\nsources:\n  - id: foo\n    resource: /project/foo.md",
+      "body ohne jeden Link",
+    );
+    const plan = await planRemoval(workdir, "project/foo.md");
+
+    expect(plan.success && plan.data.incomingLinks).toEqual([
+      { fromConceptId: "zitierer", toConceptId: "project/foo" },
+    ]);
+
+    const report = await removeFromWiki(workdir, "project/foo.md", "2026-08-01");
+    expect(report.success && report.data.rewrittenConcepts).toEqual(["zitierer"]);
+  });
+
+  it("resolves a relative sources[].resource against the citing concept", async () => {
+    await writeConcept("project/foo.md", "type: note", "# Foo");
+    await writeConcept(
+      "project/bar.md",
+      "type: note\nsources:\n  - id: foo\n    resource: ./foo.md",
+      "body",
+    );
+    const plan = await planRemoval(workdir, "project/foo.md");
+
+    expect(plan.success && plan.data.incomingLinks).toEqual([
+      { fromConceptId: "project/bar", toConceptId: "project/foo" },
+    ]);
+  });
+
+  it("lists a concept once when it references the target in body AND frontmatter", async () => {
+    await writeConcept("project/foo.md", "type: note", "# Foo");
+    await writeConcept(
+      "project/bar.md",
+      "type: note\nsources:\n  - id: foo\n    resource: /project/foo.md",
+      "See [Foo](/project/foo.md).",
+    );
+    const plan = await planRemoval(workdir, "project/foo.md");
+
+    expect(plan.success && plan.data.incomingLinks).toEqual([
+      { fromConceptId: "project/bar", toConceptId: "project/foo" },
+    ]);
+  });
+
   it("does not touch the wiki", async () => {
     await seedWiki();
     await planRemoval(workdir, "project/foo.md");

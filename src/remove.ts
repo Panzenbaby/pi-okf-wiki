@@ -34,7 +34,7 @@ import {
   TRASH_DIR,
   type ConceptRemoval,
 } from "./wiki.ts";
-import { collectConceptLinks, compileRemovedConceptRewriter } from "./links.ts";
+import { collectConceptReferences, compileRemovedConceptRewriter } from "./links.ts";
 
 /** A link from a surviving concept to one that is about to be removed. */
 export interface IncomingLink {
@@ -53,7 +53,7 @@ export interface RemovalPlan {
 export interface RemovalReport {
   readonly removed: readonly ConceptRemoval[];
   readonly removedDirectories: readonly string[];
-  /** Concepts whose body links were redirected to the trash. */
+  /** Concepts whose references were redirected to the trash. */
   readonly rewrittenConcepts: readonly string[];
 }
 
@@ -78,10 +78,18 @@ export async function planRemoval(
   const incomingLinks: IncomingLink[] = [];
   for (const concept of concepts.data) {
     if (doomed.has(concept.conceptId)) continue;
-    for (const toConceptId of collectConceptLinks(concept.body, dirOf(concept.conceptId))) {
+    // The raw file, not `concept.body`: the rewriter also redirects
+    // frontmatter `resource:` values, and the dialog must not understate what
+    // the removal will touch.
+    const content = await readTextFile(concept.absolutePath);
+    if (!content.success) return content;
+    for (const toConceptId of collectConceptReferences(
+      content.data,
+      dirOf(concept.conceptId),
+    )) {
       if (!doomed.has(toConceptId)) continue;
-      // A concept may cite the same target several times; the dialog lists
-      // relationships, not occurrences.
+      // A concept may cite the same target several times (body and
+      // frontmatter alike); the dialog lists relationships, not occurrences.
       const key = `${concept.conceptId}\u0000${toConceptId}`;
       if (seen.has(key)) continue;
       seen.add(key);

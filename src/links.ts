@@ -163,9 +163,61 @@ function mapProseLines(body: string, transform: (line: string) => string): strin
 }
 
 /**
+ * A frontmatter `resource:` value, either the top-level one or a
+ * `sources[].resource` entry (§5.1/§6.2). Line-based so every other
+ * frontmatter byte is preserved when a value is rewritten.
+ */
+const FRONTMATTER_RESOURCE_RE = /^(\s*(?:-\s+)?resource:\s*)(\S.*?)\s*$/;
+
+/**
+ * Apply `transform` to every frontmatter `resource:` value; a null result
+ * leaves the line untouched. Shared by the rewriter and the removal plan so
+ * the confirmation dialog cannot announce fewer references than the rewriter
+ * will change.
+ */
+function mapFrontmatterResources(
+  frontmatter: string,
+  transform: (rawValue: string) => string | null,
+): { content: string; changed: boolean } {
+  if (frontmatter === "") return { content: frontmatter, changed: false };
+  let changed = false;
+  const out = frontmatter
+    .split("\n")
+    .map((line) => {
+      const match = FRONTMATTER_RESOURCE_RE.exec(line);
+      if (match === null) return line;
+      const replacement = transform(unquoteYaml(match[2]!));
+      if (replacement === null) return line;
+      changed = true;
+      return `${match[1]!}${replacement}`;
+    })
+    .join("\n");
+  return { content: out, changed };
+}
+
+/**
+ * Concept ids referenced by a whole concept document: markdown links in the
+ * body plus frontmatter `resource:` values. Shared with the removal plan so
+ * the confirmation dialog covers exactly what the rewriter redirects.
+ */
+export function collectConceptReferences(
+  content: string,
+  sourceDir: string,
+): readonly string[] {
+  const { frontmatter, body } = splitFrontmatter(content);
+  const ids: string[] = [];
+  mapFrontmatterResources(frontmatter, (rawValue) => {
+    const conceptId = conceptIdFromLinkTarget(rawValue, sourceDir);
+    if (conceptId !== null) ids.push(conceptId);
+    return null;
+  });
+  ids.push(...collectConceptLinks(body, sourceDir));
+  return ids;
+}
+
+/**
  * Concept ids linked from `body` (inline and reference-style, code fences
- * excluded), resolved relative to `sourceDir`. Shared with the removal plan so
- * the confirmation dialog counts exactly the links the rewriter will redirect.
+ * excluded), resolved relative to `sourceDir`.
  */
 export function collectConceptLinks(
   body: string,
@@ -250,32 +302,14 @@ export function compileRemovedConceptRewriter(
     return { content: out, changed };
   };
 
-  /**
-   * Redirect `resource:` values in the frontmatter, line-based so every other
-   * frontmatter byte (key order, comments, quoting of other values) is
-   * preserved. Matches both the top-level `resource:` and list-item
-   * `- resource:` / indented `resource:` forms of a `sources` entry.
-   */
   const rewriteFrontmatter = (
     frontmatter: string,
     sourceDir: string,
-  ): { content: string; changed: boolean } => {
-    if (frontmatter === "") return { content: frontmatter, changed: false };
-    let changed = false;
-    const out = frontmatter
-      .split("\n")
-      .map((line) => {
-        const match = /^(\s*(?:-\s+)?resource:\s*)(\S.*?)\s*$/.exec(line);
-        if (match === null) return line;
-        const rawValue = unquoteYaml(match[2]!);
-        const trashPath = redirectTarget(rawValue, sourceDir);
-        if (trashPath === null) return line;
-        changed = true;
-        return `${match[1]!}${quoteYamlIfNeeded(trashPath)}`;
-      })
-      .join("\n");
-    return { content: out, changed };
-  };
+  ): { content: string; changed: boolean } =>
+    mapFrontmatterResources(frontmatter, (rawValue) => {
+      const trashPath = redirectTarget(rawValue, sourceDir);
+      return trashPath === null ? null : quoteYamlIfNeeded(trashPath);
+    });
 
   return {
     hasMappings: true,
