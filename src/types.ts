@@ -121,6 +121,14 @@ export interface InputFile {
   readonly tempRelativeNames?: readonly string[];
   /** Source format id when extracted (e.g. "docx"). */
   readonly sourceFormat?: string;
+  /** Staged embedded images and reliably available locations; originals remain the archive artifact. */
+  readonly embeddedImages?: readonly {
+    readonly path: string;
+    readonly context?: string;
+    readonly location?: string;
+  }[];
+  /** Non-fatal extractor issues, including image workload/failure limitations. */
+  readonly extractionWarnings?: readonly string[];
 }
 
 /** Snapshot of the wiki used for diffing before/after an update. */

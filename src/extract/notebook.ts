@@ -10,6 +10,7 @@ import { readFile } from "node:fs/promises";
 
 import { ok, type Result } from "../types.ts";
 import type { ExtractedText, DocumentExtractorRepository } from "./types.ts";
+import { readEmbeddedImages, type EmbeddedImageReference } from "./embedded-images.ts";
 import { extractionFailure, message } from "./util.ts";
 
 /** Jupyter notebook JSON (Dto) — only the slice we touch is typed here. */
@@ -20,6 +21,10 @@ interface NotebookDto {
 interface NotebookCellDto {
   readonly cell_type?: string;
   readonly source?: string | readonly string[];
+  readonly outputs?: readonly NotebookOutputDto[];
+}
+interface NotebookOutputDto {
+  readonly data?: Readonly<Record<string, string | readonly string[]>>;
 }
 interface NotebookMetadataDto {
   readonly language_info?: { readonly name?: string };
@@ -57,17 +62,49 @@ export class NotebookRepository implements DocumentExtractorRepository {
       ?? notebook.metadata?.kernelspec?.language
       ?? "";
     const chunks: string[] = [];
-    for (const cell of notebook.cells ?? []) {
+    const embeddedReferences: EmbeddedImageReference[] = [];
+    const cells = notebook.cells ?? [];
+    for (let cellIndex = 0; cellIndex < cells.length; cellIndex++) {
+      const cell = cells[cellIndex];
       const source = joinSource(cell.source).trim();
-      if (source.length === 0) continue;
-      chunks.push(cell.cell_type === "code" ? fence(source, language) : source);
+      if (source.length > 0) chunks.push(cell.cell_type === "code" ? fence(source, language) : source);
+      for (const output of cell.outputs ?? []) {
+        for (const [mediaType, encodedValue] of Object.entries(output.data ?? {})) {
+          if (!mediaType.startsWith("image/")) continue;
+          const encoded = Array.isArray(encodedValue) ? encodedValue.join("") : encodedValue;
+          if (typeof encoded !== "string") continue;
+          const extension = mediaType.split("/")[1] ?? "bin";
+          const fileName = `notebook-cell-${cellIndex + 1}.${extension}`;
+          const estimatedBytes = Math.floor(encoded.length * 3 / 4);
+          embeddedReferences.push({
+            file: {
+              name: fileName,
+              _data: { uncompressedSize: estimatedBytes },
+              async: async () => new Uint8Array(Buffer.from(encoded, "base64")),
+            },
+            location: `Cell ${cellIndex + 1}`,
+            ...(source.length > 0 ? { context: source.slice(0, 500) } : {}),
+          });
+        }
+      }
     }
 
     const text = chunks.join("\n\n").trim();
-    if (text.length === 0) {
-      return extractionFailure("empty", "Notebook holds no cell content.", absolutePath);
+    const embedded = await readEmbeddedImages(embeddedReferences, this.sourceFormat);
+    if (text.length === 0 && embedded.images.length === 0) {
+      return extractionFailure("empty", "Notebook holds no cell content or embedded images.", absolutePath);
     }
-    return ok<ExtractedText>({ parts: [text], sourceFormat: this.sourceFormat, warnings: [] });
+    return ok<ExtractedText>({
+      parts: [text || "No extractable cell text; inspect the embedded images."],
+      sourceFormat: this.sourceFormat,
+      warnings: [
+        ...embedded.warnings,
+        ...(embeddedReferences.length === embedded.images.length
+          ? []
+          : [`ipynb: skipped ${embeddedReferences.length - embedded.images.length} embedded image(s) due to format, size, or workload limits.`]),
+      ],
+      embeddedImages: embedded.images,
+    });
   }
 }
 

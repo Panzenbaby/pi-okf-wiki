@@ -29,9 +29,6 @@ jobs:
       - name: Type-check
         run: npm run check
 
-      - name: Publish to npm
-        run: npm publish --access public
-
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:

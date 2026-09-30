@@ -152,6 +152,8 @@ class InputClassifier implements Classifier {
           extractedTextPaths: artifact.extractedTextPaths,
           tempRelativeNames: artifact.tempRelativeNames,
           sourceFormat: artifact.sourceFormat,
+          embeddedImages: artifact.embeddedImages,
+          extractionWarnings: artifact.warnings,
         });
       } else {
         extractionIgnored.push({

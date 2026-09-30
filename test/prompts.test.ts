@@ -46,6 +46,29 @@ describe("buildUpdatePrompt file list", () => {
     expect(prompt.split("logs/events.jsonl (").length - 1).toBe(1);
   });
 
+  it("lists embedded images with location/context and records extraction limitations", () => {
+    const prompt = promptFor([
+      {
+        relativePath: "reports/sales.pptx",
+        absolutePath: "/w/input/reports/sales.pptx",
+        archiveTarget: "/w/wiki/archive/reports/sales.pptx",
+        extractedTextPaths: ["/w/input/.okf-extract/reports/sales-extracted.txt"],
+        sourceFormat: "pptx",
+        embeddedImages: [{
+          path: "/w/input/.okf-extract/reports/sales-embedded-image-01.png",
+          location: "Slide 4",
+          context: "Revenue overview",
+        }],
+        extractionWarnings: ["pptx: skipped image beyond workload limit"],
+      },
+    ]);
+    expect(prompt).toContain("sales-embedded-image-01.png — Slide 4");
+    expect(prompt).toContain("surrounding text: Revenue overview");
+    expect(prompt).toContain("record these in the update log");
+    expect(prompt).toContain("Embedded images are temporary visual aids");
+    expect(prompt).toContain("state unreadable content or uncertain context without guessing");
+  });
+
   it("reads a plain-text file directly instead of an extract", () => {
     const prompt = promptFor([
       {

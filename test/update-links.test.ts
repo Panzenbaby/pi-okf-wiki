@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { rewriteArchiveCitationsInConcepts } from "../src/update.ts";
+import { appendLogMd } from "../src/wiki/index-log.ts";
 
 let workdir: string;
 
@@ -30,6 +31,19 @@ async function readConcept(relativePath: string): Promise<string> {
   const { readFile } = await import("node:fs/promises");
   return readFile(join(workdir, relativePath), "utf8");
 }
+
+describe("update log image diagnostics", () => {
+  it("records extractor failures/limits and agent-reported uncertainty", async () => {
+    const result = await appendLogMd(workdir, "2026-09-30", { created: [], updated: [] }, [
+      "report.pptx: skipped one embedded image after the image limit",
+      "Image analysis limitation reported by agent: Some chart labels are unreadable; uncertain values were omitted.",
+    ]);
+    expect(result.success).toBe(true);
+    expect(await readConcept("log.md")).toContain("**Warning**: report.pptx: skipped one embedded image after the image limit");
+    expect(await readConcept("log.md")).toContain("Some chart labels are unreadable; uncertain values were omitted.");
+    expect(await readConcept("log.md")).not.toContain("No-op");
+  });
+});
 
 describe("rewriteArchiveCitationsInConcepts", () => {
   it("rewrites placeholder links in agent-written concepts to the renamed archive path", async () => {

@@ -6,6 +6,13 @@
 
 import { ok, type Result } from "../types.ts";
 import type { ExtractedText, DocumentExtractorRepository } from "./types.ts";
+import {
+  MAX_EMBEDDED_IMAGE_BYTES,
+  MAX_EMBEDDED_IMAGE_TOTAL_BYTES,
+  MAX_EMBEDDED_IMAGES,
+  readEmbeddedImages,
+  type EmbeddedImageReference,
+} from "./embedded-images.ts";
 import { extractionFailure, message } from "./util.ts";
 
 /** Maximum rows rendered per sheet; the agent's `read` tool truncates anyway. */
@@ -15,12 +22,19 @@ const MAX_ROWS_PER_SHEET = 5000;
 interface ExcelWorkbookDto {
   readonly worksheets: ReadonlyArray<ExcelWorksheetDto>;
   eachSheet(callback: (worksheet: ExcelWorksheetDto, sheetId: number) => void): void;
+  getImage(id: number): ExcelImageDto;
+}
+interface ExcelImageDto {
+  readonly extension: string;
+  readonly buffer?: Uint8Array;
+  readonly base64?: string;
 }
 interface ExcelWorksheetDto {
   readonly name: string;
   readonly rowCount: number;
   readonly columnCount: number;
   getRow(index: number): { values: ReadonlyArray<unknown> };
+  getImages(): ReadonlyArray<{ readonly imageId: string; readonly range: { readonly tl: { readonly col: number; readonly row: number } } }>;
 }
 interface ExcelModuleDto {
   default: { Workbook: new () => ExcelWorkbookDto & { xlsx: { readFile(path: string): Promise<ExcelWorkbookDto> } } };
@@ -44,15 +58,64 @@ export class SheetRepository implements DocumentExtractorRepository {
       await workbook.xlsx.readFile(absolutePath);
       const warnings: string[] = [];
       const sheets: string[] = [];
+      const embeddedReferences: EmbeddedImageReference[] = [];
+      let imageBytes = 0;
+      let imageLimitReported = false;
       workbook.eachSheet((worksheet) => {
         const rendered = renderSheet(worksheet, warnings);
         if (rendered.length > 0) sheets.push(rendered);
+        for (const imagePlacement of worksheet.getImages()) {
+          if (embeddedReferences.length >= MAX_EMBEDDED_IMAGES) {
+            if (!imageLimitReported) warnings.push(`XLSX: skipped remaining embedded images after the ${MAX_EMBEDDED_IMAGES}-image limit.`);
+            imageLimitReported = true;
+            continue;
+          }
+          const imageId = Number.parseInt(imagePlacement.imageId, 10);
+          if (!Number.isFinite(imageId)) {
+            warnings.push(`XLSX: skipped image with an invalid workbook image id on sheet "${worksheet.name}".`);
+            continue;
+          }
+          const image = workbook.getImage(imageId);
+          const data = image.buffer ?? (image.base64 === undefined ? undefined : Buffer.from(image.base64, "base64"));
+          if (data === undefined) {
+            warnings.push(`XLSX: could not extract embedded image ${imageId} from sheet "${worksheet.name}".`);
+            continue;
+          }
+          if (data.byteLength > MAX_EMBEDDED_IMAGE_BYTES) {
+            warnings.push(`XLSX: skipped oversized embedded image ${imageId} on sheet "${worksheet.name}".`);
+            continue;
+          }
+          if (imageBytes + data.byteLength > MAX_EMBEDDED_IMAGE_TOTAL_BYTES) {
+            warnings.push(`XLSX: skipped remaining images after the ${MAX_EMBEDDED_IMAGE_TOTAL_BYTES}-byte workload limit.`);
+            imageLimitReported = true;
+            continue;
+          }
+          imageBytes += data.byteLength;
+          const row = Math.floor(imagePlacement.range.tl.row) + 1;
+          const column = columnName(Math.floor(imagePlacement.range.tl.col) + 1);
+          const name = `image${imageId}.${image.extension}`;
+          embeddedReferences.push({
+            file: {
+              name,
+              _data: { uncompressedSize: data.byteLength },
+              async: async () => new Uint8Array(data),
+            },
+            location: `Sheet ${worksheet.name}, near ${column}${row}`,
+            context: `Worksheet: ${worksheet.name}`,
+          });
+        }
       });
       const text = sheets.join("\n\n").trim();
-      if (text.length === 0) {
-        return extractionFailure("empty", "XLSX yielded no cell content.", absolutePath);
+      const embedded = await readEmbeddedImages(embeddedReferences, this.sourceFormat);
+      if (text.length === 0 && embedded.images.length === 0) {
+        return extractionFailure("empty", "XLSX yielded no cell content or images.", absolutePath);
       }
-      return ok<ExtractedText>({ parts: [text], sourceFormat: this.sourceFormat, warnings });
+      return ok<ExtractedText>({
+        parts: [text || "No extractable cell text; inspect the embedded images."],
+        sourceFormat: this.sourceFormat,
+        warnings: [...warnings, ...embedded.warnings],
+        embeddedImages: embedded.images,
+      });
     } catch (error) {
       return extractionFailure("extraction_failed", `XLSX extraction failed: ${message(error)}`, absolutePath);
     }
@@ -91,6 +154,17 @@ function pad(row: readonly string[], width: number): string[] {
   const padded = row.slice();
   while (padded.length < width) padded.push("");
   return padded;
+}
+
+function columnName(column: number): string {
+  let value = column;
+  let result = "";
+  while (value > 0) {
+    value--;
+    result = String.fromCharCode(65 + value % 26) + result;
+    value = Math.floor(value / 26);
+  }
+  return result;
 }
 
 function cellToText(value: unknown): string {

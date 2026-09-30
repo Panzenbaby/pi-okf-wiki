@@ -84,9 +84,11 @@ available. Reload after upgrading with `/reload`.
 2. **Non-conformant** — everything else worth reading: a `.md` lacking
    frontmatter or a non-empty `type` field; plain text and images read directly
    by Pi's `read` tool; and binary/structured documents which the extension
-   **pre-extracts to plain text** into a temp
-   `input/.okf-extract/<relative-dir>/<stem>-extracted.txt` and hands *that* to
-   the agent (see [Supported formats](#supported-formats)). These are handed to
+   **pre-extracts text** into a temp
+   `input/.okf-extract/<relative-dir>/` and hands the text plus supported
+   embedded images to the agent (see [Supported formats](#supported-formats)).
+   The images are staged temporarily for visual inspection, never copied into
+   wiki concepts, and the original document retains them in the archive. These are handed to
    the agent, which reads every non-conformant file, **clusters** those
    describing the same real-world entity (matched on asserted name / resource /
    keywords, not on filename), and writes **one OKF concept per cluster**
@@ -103,7 +105,7 @@ available. Reload after upgrading with `/reload`.
    `empty`, `io_failed`) and left in `input/`.
 
 After the agent turn, the extension regenerates `index.md`, appends a dated
-entry to `log.md`, **rewrites `/archive/<input-relative-path>` placeholder
+entry to `log.md` (including extraction/analysis limitations), **rewrites `/archive/<input-relative-path>` placeholder
 citation links** in the agent-written concepts to the actual (collision-renamed)
 archive paths (so a UI can jump straight to the archived original even when it
 was renamed during the move), detects any files still left in `input/` (the
@@ -135,7 +137,7 @@ OKF /wiki-update summary
 | Conformant (deterministic) | `.md` / `.markdown` with frontmatter `type` | Copied to `wiki/` directly, no LLM. |
 | Plain text (read directly) | `.txt`, `.csv`, `.tsv`, `.json`, `.yaml`/`.yml`, `.toml`, `.dsl`, `.mmd`/`.mermaid`, `.puml`/`.plantuml`, `.dot`/`.gv`, `.rst`, `.adoc`/`.asciidoc`, `.org` | Pi's `read` tool. |
 | Images (vision) | `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.bmp` | Pi's `read` tool. |
-| Extracted to text | `.pdf`, `.docx`, `.pptx`, `.xlsx`, `.odt`, `.ods`, `.odp`, `.html`/`.htm`, `.epub`, `.rtf`, `.jsonl`/`.ndjson`, `.ipynb` | Pre-extracted to `input/.okf-extract/<rel-dir>/<stem>-extracted.txt`; the agent reads that. The original is archived; a copy of the extracted text is archived next to it. |
+| Extracted to text + embedded images | `.pdf`, `.docx`, `.pptx`, `.xlsx`, `.odt`, `.ods`, `.odp`, `.html`/`.htm`, `.epub`, `.rtf`, `.jsonl`/`.ndjson`, `.ipynb` | Text is staged at `input/.okf-extract/<rel-dir>/<stem>-extracted.txt`; supported embedded raster images are staged separately in the same temp tree and read via vision. Original documents (with embedded images) and extracted text are archived; temporary image copies are discarded. |
 
 The plain-text bucket is a deliberate allowlist, not a "does it decode as
 text?" sniff — sniffing would swallow lockfiles, keys and minified bundles,
@@ -143,11 +145,20 @@ and `unsupported` is a more useful signal. `.dsl` covers diagram/architecture
 DSLs (including the text Miro's MCP tools read and write) and is intentionally
 not parsed: that grammar is served at runtime and versioned server-side.
 
+Embedded raster images are visually analyzed alongside extracted text for the
+formats that can carry them (PDF, DOCX, PowerPoint and OpenDocument packages,
+Excel workbooks, HTML data URIs, EPUB, RTF, and notebook outputs). Image counts
+and sizes are bounded; failures/skips are non-fatal and recorded as warnings in
+`wiki/log.md`. Findings are associated with a page/slide/sheet/section where
+reliably available. Decorative images are ignored as knowledge and uncertain or
+unreadable details are not guessed. External HTML images (remote URLs) are not
+downloaded.
+
 Extraction libraries (runtime dependencies of the extension):
 
 | Format | Library |
 | --- | --- |
-| `.pdf` | [`unpdf`](https://www.npmjs.com/package/unpdf) |
+| `.pdf` | [`unpdf`](https://www.npmjs.com/package/unpdf) + [`pngjs`](https://www.npmjs.com/package/pngjs) |
 | `.docx` | [`mammoth`](https://www.npmjs.com/package/mammoth) |
 | `.xlsx` | [`exceljs`](https://www.npmjs.com/package/exceljs) (rendered as markdown tables) |
 | `.pptx` / `.odt` / `.ods` / `.odp` / `.epub` | [`jszip`](https://www.npmjs.com/package/jszip) + XML readers (`.ods` keeps rows/columns as markdown tables, `.odp` keeps slide boundaries) |
@@ -392,17 +403,17 @@ leaks outside its repository.
 | `src/update.ts` | `/wiki-update` command logic and the `IntakeSession` (finalize) that owns the agent-handoff state, including the post-agent citation-link rewrite (`rewriteArchiveCitationsInConcepts`). |
 | `src/classifier.ts` | `InputClassifier` that owns the full input→bucket pipeline AND the deterministic conformant intake: tentative dispatch by extension, the extraction pass (staging extracted text), and pass 3 — read + verify frontmatter + write to `wiki/` + archive original — for conformant `.md` files. Emits the three final buckets (`conformantImported` / `forAgent` / `ignored`) once, in input order. |
 | `src/query.ts` | `/wiki-query` command logic and the `QuerySession` that owns the pending question. Both `buildWikiQueryContext` and `runQuery` take an optional `Retriever` (default `TermFrequencyRetriever`) so the scoring strategy is injectable. |
-| `src/extract/types.ts` | `ExtractedText` AppModel (one or more text parts), `DocumentExtractorRepository` interface, extraction-failure cause codes. |
-| `src/extract/pdf.ts` | `PdfRepository` (`unpdf`). |
-| `src/extract/docx.ts` | `DocxRepository` (`mammoth`). |
+| `src/extract/types.ts` | `ExtractedText` / `EmbeddedImage` AppModels, `DocumentExtractorRepository` interface, extraction-failure cause codes. |
+| `src/extract/pdf.ts` | `PdfRepository` (`unpdf` + `pngjs`), with per-page image extraction and bounded PNG encoding. |
+| `src/extract/docx.ts` | `DocxRepository` (`mammoth`), including contextual embedded image extraction. |
 | `src/extract/sheet.ts` | `SheetRepository` (`exceljs`), rendering worksheets as markdown tables. |
-| `src/extract/office-xml.ts` | `PptxRepository`, `OdtRepository`, `OdsRepository`, `OdpRepository`, `EpubRepository` (shared `jszip` + XML helpers, EPUB spine-order). |
-| `src/extract/html.ts` | `HtmlRepository` (`html-to-text`). |
-| `src/extract/rtf.ts` | `RtfRepository` (dependency-free RTF stripper). |
+| `src/extract/office-xml.ts` | `PptxRepository`, `OdtRepository`, `OdsRepository`, `OdpRepository`, `EpubRepository` (shared `jszip` + XML helpers and contextual packaged image extraction). |
+| `src/extract/html.ts` | `HtmlRepository` (`html-to-text`), including embedded data-URI images. |
+| `src/extract/rtf.ts` | `RtfRepository` (dependency-free RTF text/image extraction). |
 | `src/extract/jsonl.ts` | `JsonLinesRepository` (`.jsonl`/`.ndjson`), the only extractor that splits its output into parts. |
-| `src/extract/notebook.ts` | `NotebookRepository` (`.ipynb`), markdown + code cells, outputs dropped. |
+| `src/extract/notebook.ts` | `NotebookRepository` (`.ipynb`), markdown + code cells and image outputs. |
 | `src/extract/registry.ts` | Format taxonomy + `ExtractorRegistry` dispatch. |
-| `src/extract/service.ts` | Extraction-to-temp-file orchestration and the `.okf-extract/` lifecycle. |
+| `src/extract/service.ts` | Text/image extraction-to-temp-file orchestration and the `.okf-extract/` lifecycle. |
 | `src/extract/util.ts` | Shared `Result<T>` failure + error-message helpers for repositories. |
 
 ### Development
@@ -413,7 +424,8 @@ npm run check        # tsc --noEmit (strict, noUnusedLocals)
 ```
 
 The extension imports `@earendil-works/pi-coding-agent` only as type-only
-imports (erased at runtime), so it has no bundled runtime dependencies.
+imports (erased at runtime). Runtime dependencies are installed from
+`package.json` and are not bundled.
 
 ## License
 

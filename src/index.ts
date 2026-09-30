@@ -16,10 +16,10 @@ import { migrateWiki } from "./migrate.ts";
 export default function okfExtension(pi: ExtensionAPI): void {
   // After any agent turn, finalize a pending /wiki-update run (if any) so the
   // summary reflects the wiki state *after* the agent finished writing.
-  pi.on("agent_end", async (_event, ctx) => {
+  pi.on("agent_end", async (event, ctx) => {
     const session = intakeSessionRegistry.take();
     if (session === undefined) return;
-    await session.finalize(ctx);
+    await session.finalize(ctx, event);
   });
 
   // Before every agent turn, check if the turn was triggered by /wiki-query.

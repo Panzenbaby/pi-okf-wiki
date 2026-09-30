@@ -7,6 +7,7 @@
 // throws to callers.
 
 import { join } from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
 
 import { copyFile, pathExists, removeDir, writeTextFile } from "../files.ts";
 import { ok, type Result } from "../types.ts";
@@ -27,10 +28,24 @@ export interface ExtractedArtifact {
   readonly tempRelativeNames: readonly string[];
   /** Source format id (e.g. "docx"). */
   readonly sourceFormat: string;
+  /** Staged images with any reliable document location/context association. */
+  readonly embeddedImages: readonly StagedEmbeddedImage[];
+  /** Non-fatal issues from text/image extraction or image staging. */
+  readonly warnings: readonly string[];
 }
 
 /** Directory name (inside `input/`) where extracted text is staged. */
 export const EXTRACTION_TEMP_DIR = ".okf-extract";
+
+const MAX_STAGED_EMBEDDED_IMAGES = 24;
+const MAX_STAGED_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_STAGED_TOTAL_IMAGE_BYTES = 32 * 1024 * 1024;
+
+export interface StagedEmbeddedImage {
+  readonly path: string;
+  readonly context?: string;
+  readonly location?: string;
+}
 
 /**
  * Remove the extraction temp dir at the start of a run so stale temp files
@@ -56,6 +71,7 @@ export async function extractToTempFile(
   if (!extracted.success) return extracted;
 
   const parts = extracted.data.parts;
+  const warnings = [...extracted.data.warnings];
   const tempRelativeNames = await tempRelativeNamesFor(
     inputRoot,
     relativePath,
@@ -70,10 +86,59 @@ export async function extractToTempFile(
     extractedTextPaths.push(path);
   }
 
+  const embeddedImages: StagedEmbeddedImage[] = [];
+  let stagedImageBytes = 0;
+  const embeddedImagePayloads = extracted.data.embeddedImages ?? [];
+  for (let index = 0; index < embeddedImagePayloads.length; index++) {
+    if (embeddedImages.length >= MAX_STAGED_EMBEDDED_IMAGES) {
+      warnings.push(`${extracted.data.sourceFormat}: skipped ${embeddedImagePayloads.length - index} embedded images after the ${MAX_STAGED_EMBEDDED_IMAGES}-image staging limit.`);
+      break;
+    }
+    const image = embeddedImagePayloads[index];
+    if (image === undefined) continue;
+    if (image.data.byteLength > MAX_STAGED_IMAGE_BYTES) {
+      warnings.push(`${extracted.data.sourceFormat}: skipped oversized embedded image ${index + 1} during staging.`);
+      continue;
+    }
+    if (stagedImageBytes + image.data.byteLength > MAX_STAGED_TOTAL_IMAGE_BYTES) {
+      warnings.push(`${extracted.data.sourceFormat}: skipped remaining images after the ${MAX_STAGED_TOTAL_IMAGE_BYTES}-byte staging limit.`);
+      break;
+    }
+    const extension = imageExtension(image.mediaType);
+    if (extension === undefined) {
+      warnings.push(`${extracted.data.sourceFormat}: could not stage an embedded image with unsupported media type ${image.mediaType}.`);
+      continue;
+    }
+    const imagePath = join(
+      inputRoot,
+      EXTRACTION_TEMP_DIR,
+      imageRelativeName(relativePath, index + 1, extension),
+    );
+    try {
+      const imageRoot = join(inputRoot, EXTRACTION_TEMP_DIR);
+      if (!imagePath.startsWith(`${imageRoot}/`)) {
+        warnings.push(`${extracted.data.sourceFormat}: skipped embedded image with unsafe generated path.`);
+        continue;
+      }
+      await mkdir(join(imagePath, ".."), { recursive: true });
+      await writeFile(imagePath, image.data);
+      stagedImageBytes += image.data.byteLength;
+      embeddedImages.push({
+        path: imagePath,
+        ...(image.context === undefined ? {} : { context: image.context }),
+        ...(image.location === undefined ? {} : { location: image.location }),
+      });
+    } catch (error) {
+      warnings.push(`${extracted.data.sourceFormat}: failed to stage embedded image ${index + 1}: ${errorMessage(error)}.`);
+    }
+  }
+
   return ok<ExtractedArtifact>({
     extractedTextPaths,
     tempRelativeNames,
     sourceFormat: extracted.data.sourceFormat,
+    embeddedImages,
+    warnings,
   });
 }
 
@@ -147,6 +212,32 @@ function partNames(base: string, partCount: number): readonly string[] {
     names.push(`${base}.part${String(index).padStart(2, "0")}.txt`);
   }
   return names;
+}
+
+function imageRelativeName(relativePath: string, index: number, extension: string): string {
+  const segments = relativePath.split("/");
+  const fileName = segments[segments.length - 1] ?? relativePath;
+  const dirParts = segments.slice(0, -1);
+  const dot = fileName.lastIndexOf(".");
+  const stem = dot > 0 ? fileName.slice(0, dot) : fileName;
+  const sourceExtension = dot > 0 ? fileName.slice(dot + 1).toLowerCase() : "document";
+  return [...dirParts, `${stem}.${sourceExtension}-embedded-image-${String(index).padStart(2, "0")}.${extension}`].join("/");
+}
+
+function imageExtension(mediaType: string): string | undefined {
+  const extensions: Readonly<Record<string, string>> = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/gif": "gif",
+    "image/webp": "webp",
+    "image/bmp": "bmp",
+    "image/tiff": "tiff",
+  };
+  return extensions[mediaType];
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function extensionOf(relativePath: string): string {

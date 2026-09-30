@@ -21,8 +21,20 @@ export interface ExtractedText {
   readonly parts: readonly string[];
   /** Source format id (e.g. "pdf", "docx", "xlsx", "pptx", "odt", "epub", "html"). */
   readonly sourceFormat: string;
-  /** Non-fatal warnings (e.g. skipped sheets, embedded images ignored). */
+  /** Non-fatal warnings (e.g. skipped sheets, extraction/image workload failures). */
   readonly warnings: readonly string[];
+  /** Embedded raster images staged separately for visual inspection by the agent. */
+  readonly embeddedImages?: readonly EmbeddedImage[];
+}
+
+/** Application-level image payload extracted from a document (never a library DTO). */
+export interface EmbeddedImage {
+  readonly data: Uint8Array;
+  readonly mediaType: string;
+  /** Nearby text or structural context, when it can be associated reliably. */
+  readonly context?: string;
+  /** Page, slide, sheet, or section identifier, when available. */
+  readonly location?: string;
 }
 
 /**

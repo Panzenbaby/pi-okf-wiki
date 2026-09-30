@@ -8,6 +8,7 @@
 // racy pre-turn snapshot.
 
 import type {
+  AgentEndEvent,
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
@@ -110,7 +111,7 @@ export interface IntakeSession extends Session {
   /** Records that an agent turn is in flight (called before sendUserMessage). */
   handoffToAgent(): void;
   /** Run the post-agent finalize (snapshot diff, index/log, summary). */
-  finalize(ctx: ExtensionContext): Promise<UpdateReport>;
+  finalize(ctx: ExtensionContext, event?: AgentEndEvent): Promise<UpdateReport>;
 }
 
 class IntakeSessionImpl implements IntakeSession {
@@ -145,8 +146,8 @@ class IntakeSessionImpl implements IntakeSession {
     this.hadAgentTurn = true;
   }
 
-  async finalize(ctx: ExtensionContext): Promise<UpdateReport> {
-    const warnings: string[] = [...this.warnings];
+  async finalize(ctx: ExtensionContext, event?: AgentEndEvent): Promise<UpdateReport> {
+    const warnings: string[] = [...this.warnings, ...agentImageWarnings(event)];
 
     const afterSnapshot = await snapshotWiki(this.paths.wiki);
     const afterEntries = afterSnapshot.success
@@ -158,7 +159,8 @@ class IntakeSessionImpl implements IntakeSession {
     if (allConcepts.success) {
       await writeAllIndexMd(this.paths.wiki, allConcepts.data);
     }
-    await appendLogMd(this.paths.wiki, this.today, diff);
+    // Image workload/extraction diagnostics from the classifier are included
+    // alongside any image-analysis limitations reported by the agent below.
 
     // Rewrite `/archive/<input-relative-path>` placeholder citation links
     // in agent-written concepts to the actual (collision-renamed) archive
@@ -178,7 +180,6 @@ class IntakeSessionImpl implements IntakeSession {
       this.archiveTargets,
     );
     for (const warning of rewriteWarnings) warnings.push(warning);
-
     const leftover = await detectLeftover(this.paths.input, this.nonConformant);
     const leftoverSet = new Set(leftover);
 
@@ -186,18 +187,20 @@ class IntakeSessionImpl implements IntakeSession {
     // (i.e. not leftover). Leftover originals keep their temp text only until the
     // cleanup below removes it — it is regenerated on the next run.
     for (const file of this.nonConformant) {
-      if (file.tempRelativeNames === undefined) continue;
+      if (file.tempRelativeNames === undefined && (file.embeddedImages?.length ?? 0) === 0) continue;
       if (leftoverSet.has(file.relativePath)) continue;
-      const archived = await archiveExtractedText(
-        this.paths.input,
-        this.paths.archive,
-        file.tempRelativeNames,
-        resolveArchiveTarget,
-      );
-      if (!archived.success) {
-        warnings.push(
-          `Could not archive extracted text for ${file.relativePath}: ${archived.error.message}`,
+      if (file.tempRelativeNames !== undefined) {
+        const archived = await archiveExtractedText(
+          this.paths.input,
+          this.paths.archive,
+          file.tempRelativeNames,
+          resolveArchiveTarget,
         );
+        if (!archived.success) {
+          warnings.push(
+            `Could not archive extracted text for ${file.relativePath}: ${archived.error.message}`,
+          );
+        }
       }
     }
     const cleaned = await cleanupExtractionTemp(this.paths.input);
@@ -212,7 +215,6 @@ class IntakeSessionImpl implements IntakeSession {
     if (!pruned.success) {
       warnings.push(`Could not prune empty input folders: ${pruned.error.message}`);
     }
-
     const report: UpdateReport = {
       conformantImported: this.conformantImported,
       nonConformantHandedToAgent: this.nonConformant.map((file) => file.relativePath),
@@ -226,10 +228,28 @@ class IntakeSessionImpl implements IntakeSession {
       warnings,
     };
 
+    await appendLogMd(this.paths.wiki, this.today, diff, warnings);
     ctx.ui.setStatus("okf-update", "");
     showSummary(ctx, report);
     return report;
   }
+}
+
+function agentImageWarnings(event: AgentEndEvent | undefined): string[] {
+  if (event === undefined) return [];
+  const warnings: string[] = [];
+  for (const message of event.messages) {
+    if (message.role !== "assistant") continue;
+    for (const content of message.content) {
+      if (content.type !== "text") continue;
+      for (const line of content.text.split(/\r?\n/)) {
+        if (/\b(?:image|visual|chart|diagram|picture|labels|values|axis|legend|font)\b.*\b(?:unreadable|uncertain|failed|skipped|could not|unable|not available|illegible)\b|\b(?:unreadable|uncertain|failed|skipped|could not|unable|not available|illegible)\b.*\b(?:image|visual|chart|diagram|picture|labels|values|axis|legend|font)\b/i.test(line)) {
+          warnings.push(`Image analysis limitation reported by agent: ${line.trim()}`);
+        }
+      }
+    }
+  }
+  return [...new Set(warnings)];
 }
 
 let intakeSessionCounter = 0;
@@ -360,6 +380,11 @@ export async function runUpdate(
   const classified = await classifier.classify(inputFiles.data);
   if (!classified.success) return classified;
   const { conformantImported, forAgent, ignored } = classified.data;
+  for (const file of forAgent) {
+    for (const warning of file.extractionWarnings ?? []) {
+      runWarnings.push(`${file.relativePath}: ${warning}`);
+    }
+  }
 
   // Snapshot the wiki AFTER the deterministic classifier run (conformant imports
   // are already on disk) but BEFORE the agent turn. The finalize citation-link
@@ -395,6 +420,8 @@ export async function runUpdate(
       archiveTarget: target,
       extractedTextPaths: file.extractedTextPaths,
       sourceFormat: file.sourceFormat,
+      embeddedImages: file.embeddedImages,
+      extractionWarnings: file.extractionWarnings,
     });
   }
 

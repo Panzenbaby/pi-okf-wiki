@@ -9,11 +9,12 @@ import { readFile } from "node:fs/promises";
 
 import { ok, type Result } from "../types.ts";
 import type { ExtractedText, DocumentExtractorRepository } from "./types.ts";
+import { readEmbeddedImages, type EmbeddedImageReference } from "./embedded-images.ts";
 import { extractionFailure, message } from "./util.ts";
 
 /** RTF destination control words whose whole group is discarded. */
 const SKIP_DESTINATIONS = new Set([
-  "fonttbl", "colortbl", "stylesheet", "info", "pict", "header", "footer",
+  "fonttbl", "colortbl", "stylesheet", "info", "header", "footer",
   "footnote", "comment", "object", "fldinst", "filetbl", "listtable",
   "overridetable", "rsidtbl", "generator", "operator", "category", "title",
   "subject", "author", "manager", "company", "keywords", "annotation",
@@ -48,15 +49,65 @@ export class RtfRepository implements DocumentExtractorRepository {
       return extractionFailure("extraction_failed", `Failed to read RTF: ${message(error)}`, absolutePath);
     }
     try {
-      const text = stripRtf(buffer.toString("latin1")).replace(/\n{3,}/g, "\n\n").trim();
-      if (text.length === 0) {
-        return extractionFailure("empty", "RTF yielded no text.", absolutePath);
+      const raw = buffer.toString("latin1");
+      const text = stripRtf(raw).replace(/\n{3,}/g, "\n\n").trim();
+      const embedded = await readEmbeddedImages(extractRtfImages(raw), this.sourceFormat);
+      if (text.length === 0 && embedded.images.length === 0) {
+        return extractionFailure("empty", "RTF yielded no text or extractable images.", absolutePath);
       }
-      return ok<ExtractedText>({ parts: [text], sourceFormat: this.sourceFormat, warnings: [] });
+      return ok<ExtractedText>({
+        parts: [text || "No extractable text; inspect the embedded images."],
+        sourceFormat: this.sourceFormat,
+        warnings: embedded.warnings,
+        embeddedImages: embedded.images,
+      });
     } catch (error) {
       return extractionFailure("extraction_failed", `RTF extraction failed: ${message(error)}`, absolutePath);
     }
   }
+}
+
+function findRtfGroupEnd(rtf: string, start: number): number {
+  let depth = 1;
+  let escaped = false;
+  for (let index = start; index < rtf.length; index++) {
+    const character = rtf[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (character === "{") depth++;
+    if (character === "}" && --depth === 0) return index + 1;
+  }
+  return rtf.length;
+}
+
+function extractRtfImages(rtf: string): EmbeddedImageReference[] {
+  const references: EmbeddedImageReference[] = [];
+  const pictPattern = /\\pict\b([\s\S]*?)(?=\})/gi;
+  for (const match of rtf.matchAll(pictPattern)) {
+    const body = match[1] ?? "";
+    const format = /\\(pngblip|jpegblip|jpgblip)(?:\s|\d)/i.exec(body)?.[1]?.toLowerCase();
+    if (format === undefined) continue;
+    const mediaType = format === "pngblip" ? "image/png" : "image/jpeg";
+    const hex = body
+      .replace(/\\[a-zA-Z]+-?\d* ?/g, "")
+      .replace(/\\'[0-9a-fA-F]{2}/g, "")
+      .replace(/[^0-9a-fA-F]/g, "");
+    if (hex.length < 8 || hex.length % 2 !== 0) continue;
+    const data = Buffer.from(hex, "hex");
+    references.push({
+      file: {
+        name: `embedded-image.${mediaType === "image/png" ? "png" : "jpg"}`,
+        async: async () => new Uint8Array(data),
+      },
+    });
+  }
+  return references;
 }
 
 interface Frame {
@@ -134,6 +185,12 @@ function stripRtf(rtf: string): string {
     if (frame !== undefined && !frame.skip && !frame.anyContent && (word === "*" || SKIP_DESTINATIONS.has(word))) {
       frame.skip = true;
       skipCount++;
+      markContent(stack);
+      continue;
+    }
+    if (word === "pict") {
+      const groupEnd = findRtfGroupEnd(rtf, i);
+      i = groupEnd;
       markContent(stack);
       continue;
     }

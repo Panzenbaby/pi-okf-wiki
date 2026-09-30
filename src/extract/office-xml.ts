@@ -16,7 +16,8 @@
 import { readFile } from "node:fs/promises";
 
 import { ok, type Result } from "../types.ts";
-import type { ExtractedText, DocumentExtractorRepository } from "./types.ts";
+import type { EmbeddedImage, ExtractedText, DocumentExtractorRepository } from "./types.ts";
+import { readEmbeddedImages, type EmbeddedImageReference } from "./embedded-images.ts";
 import { extractionFailure, message } from "./util.ts";
 
 /** JSZip instance (Dto) — only the slice we touch is typed here. */
@@ -27,7 +28,9 @@ interface JSZipDto {
 }
 interface JSZipFileDto {
   readonly name: string;
+  readonly _data?: { readonly uncompressedSize?: number };
   async(type: "string"): Promise<string>;
+  async(type: "uint8array"): Promise<Uint8Array>;
 }
 interface JSZipModuleDto {
   default: new () => JSZipDto;
@@ -57,10 +60,22 @@ abstract class ZipXmlRepository implements DocumentExtractorRepository {
     const warnings: string[] = [];
     try {
       const text = (await this.render(zip, warnings)).trim();
-      if (text.length === 0) {
-        return extractionFailure("empty", `${this.sourceFormat} yielded no text.`, absolutePath);
+      const embedded = await extractContainerImages(zip, this.sourceFormat);
+      if (text.length === 0 && embedded.images.length === 0) {
+        return extractionFailure("empty", `${this.sourceFormat} yielded no text or images.`, absolutePath);
       }
-      return ok<ExtractedText>({ parts: [text], sourceFormat: this.sourceFormat, warnings });
+      return ok<ExtractedText>({
+        parts: [text || "No extractable text; inspect the embedded images."],
+        sourceFormat: this.sourceFormat,
+        warnings: [
+          ...warnings,
+          ...embedded.warnings,
+          ...(imageReferenceCount(zip) > embedded.images.length && embedded.warnings.length === 0
+            ? [`${this.sourceFormat}: some embedded images could not be extracted; no additional detail was available.`]
+            : []),
+        ],
+        embeddedImages: embedded.images,
+      });
     } catch (error) {
       return extractionFailure("extraction_failed", `${this.sourceFormat} extraction failed: ${message(error)}`, absolutePath);
     }
@@ -285,6 +300,123 @@ function extractTagContents(xml: string, tagName: string): string[] {
     matches.push(match[1] ?? "");
   }
   return matches;
+}
+
+function imageReferenceCount(zip: JSZipDto): number {
+  return zip.file(/\.(?:png|jpe?g|gif|webp|bmp|tiff?)$/i).length;
+}
+
+async function extractContainerImages(
+  zip: JSZipDto,
+  format: string,
+): Promise<{ readonly images: readonly EmbeddedImage[]; readonly warnings: readonly string[] }> {
+  const mediaFiles = zip.file(/\.(?:png|jpe?g|gif|webp|bmp|tiff?)$/i);
+  const locations = new Map<string, string>();
+  const contexts = new Map<string, string>();
+  const sections = format === "pptx"
+    ? zip.file(/^ppt\/slides\/slide\d+\.xml$/)
+    : format === "odt"
+      ? zip.file("content.xml") === null ? [] : [zip.file("content.xml") as JSZipFileDto]
+      : format === "odp"
+      ? zip.file("content.xml") === null ? [] : [zip.file("content.xml") as JSZipFileDto]
+      : format === "epub"
+        ? zip.file(/\.(?:x?html?)$/i)
+        : [];
+  for (const section of sections) {
+    const xml = await section.async("string");
+    if (format === "pptx") {
+      const slideNumber = slideIndex(section.name);
+      const relationshipPath = section.name.replace(/\/([^/]+\.xml)$/, "/_rels/$1.rels");
+      const relationships = await zip.file(relationshipPath)?.async("string") ?? "";
+      const targets = new Map<string, string>();
+      for (const match of relationships.matchAll(/<Relationship\b(?=[^>]*\bId="([^"]+)")(?=[^>]*\bTarget="([^"]+)")[^>]*>/g)) {
+        const id = match[1];
+        const target = match[2];
+        if (id !== undefined && target !== undefined) targets.set(id, resolveZipTarget(section.name, target));
+      }
+      for (const match of xml.matchAll(/<a:blip\b[^>]*\br:embed="([^"]+)"/g)) {
+        const targetName = targets.get(match[1] ?? "");
+        if (targetName !== undefined) locations.set(targetName, `Slide ${slideNumber}`);
+      }
+    } else if (format === "odt") {
+      let precedingHeading = "";
+      let paragraphNumber = 0;
+      const blockPattern = /<text:(h|p)\b([^>]*)>([\s\S]*?)<\/text:\1>/gi;
+      for (const block of xml.matchAll(blockPattern)) {
+        const tag = block[1]?.toLowerCase();
+        const blockXml = block[3] ?? "";
+        const blockText = stripXmlTags(blockXml);
+        if (tag === "h" && blockText.length > 0) precedingHeading = blockText;
+        if (tag === "p") paragraphNumber++;
+        for (const match of blockXml.matchAll(/(?:xlink:href|href)=["']([^"'#]+\.(?:png|jpe?g|gif|webp|bmp|tiff?))["']/gi)) {
+          const target = match[1];
+          if (target === undefined) continue;
+          const imagePath = resolveZipTarget("content.xml", target);
+          const inlineHeading = precedingHeading.length === 0
+            ? [...blockXml.matchAll(/<text:h\b[^>]*>([\s\S]*?)<\/text:h>/gi)]
+                .map((heading) => stripXmlTags(heading[1] ?? ""))
+                .filter((heading) => heading.length > 0)
+                .at(-1) ?? ""
+            : "";
+          const heading = precedingHeading || inlineHeading;
+          const context = [heading, blockText].filter((value) => value.length > 0).join(" — ");
+          const location = heading.length > 0
+            ? `Section: ${heading}`
+            : `Paragraph ${paragraphNumber}; section uncertain`;
+          locations.set(imagePath, location);
+          if (context.length > 0) contexts.set(imagePath, context);
+        }
+      }
+    } else if (format === "odp") {
+      let slideNumber = 0;
+      for (const page of xml.matchAll(PAGE_PATTERN)) {
+        slideNumber++;
+        for (const match of (page[2] ?? "").matchAll(/(?:xlink:href|draw:name)="([^"]+\.(?:png|jpe?g|gif|webp|bmp|tiff?))"/gi)) {
+          const target = match[1];
+          if (target !== undefined) locations.set(resolveZipTarget("content.xml", target), `Slide ${slideNumber}`);
+        }
+      }
+    } else {
+      const chapter = section.name.match(/([^/]+)\.(?:x?html?)$/i)?.[1] ?? section.name;
+      for (const match of xml.matchAll(/(?:src|href)=["']([^"'#]+\.(?:png|jpe?g|gif|webp|bmp|tiff?))["']/gi)) {
+        const target = match[1];
+        if (target !== undefined) locations.set(resolveZipTarget(section.name, target), `EPUB section ${chapter}`);
+      }
+    }
+  }
+  const references: EmbeddedImageReference[] = mediaFiles.map((file) => {
+    const location = locations.get(file.name);
+    const context = contexts.get(file.name);
+    return {
+      file,
+      ...(location === undefined ? {} : { location }),
+      ...(context === undefined ? {} : { context }),
+    };
+  });
+  const result = await readEmbeddedImages(references, format);
+  if (format !== "odt") return result;
+  const uncertainCount = references.filter((reference) => reference.location === undefined).length;
+  return uncertainCount === 0
+    ? result
+    : {
+        images: result.images.map((image) => image.location === undefined
+          ? { ...image, location: "ODT section uncertain; no reliable text reference found" }
+          : image),
+        warnings: [
+          ...result.warnings,
+          `${format}: ${uncertainCount} embedded image(s) could not be associated with surrounding text; section context is uncertain.`,
+        ],
+      };
+}
+
+function resolveZipTarget(sourcePath: string, targetPath: string): string {
+  const directory = sourcePath.includes("/") ? sourcePath.slice(0, sourcePath.lastIndexOf("/") + 1) : "";
+  const segments: string[] = [];
+  for (const segment of normalizePath(directory + targetPath.split("#")[0]).split("/")) {
+    if (segment === "..") segments.pop();
+    else if (segment !== "" && segment !== ".") segments.push(segment);
+  }
+  return segments.join("/");
 }
 
 function stripXmlTags(xml: string): string {

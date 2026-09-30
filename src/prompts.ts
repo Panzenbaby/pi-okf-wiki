@@ -88,6 +88,12 @@ export interface UpdatePromptInput {
     extractedTextPaths?: readonly string[];
     /** Source format id when extracted (e.g. "docx"). */
     sourceFormat?: string;
+    embeddedImages?: readonly {
+      readonly path: string;
+      readonly context?: string;
+      readonly location?: string;
+    }[];
+    extractionWarnings?: readonly string[];
   }>;
   readonly archiveDir: string;
   readonly wikiDir: string;
@@ -99,13 +105,25 @@ export function buildUpdatePrompt(input: UpdatePromptInput): string {
     .map((file) => {
       const extracted = file.extractedTextPaths ?? [];
       const format = file.sourceFormat ?? "unknown";
+      const imageEntries = file.embeddedImages ?? [];
+      const imageLine = imageEntries.length > 0
+        ? `\n  Embedded images (${imageEntries.length}; inspect with the read tool):\n${imageEntries.map((image) => `    - ${image.path}${image.location === undefined ? "" : ` — ${image.location}`}${image.context === undefined ? "" : `; surrounding text: ${image.context}`}`).join("\n")}`
+        : "";
+      const extractionWarnings = file.extractionWarnings ?? [];
+      const warningLine = extractionWarnings.length > 0
+        ? `\n  Extraction limitations (record these in the update log): ${extractionWarnings.join("; ")}`
+        : "";
+      const sectionLine = imageEntries.length > 0
+        ? `\n  Context requirements: associate findings with surrounding sections and page/slide/sheet when available; state unreadable content or uncertain context without guessing.`
+        : "";
+      const extras = `${imageLine}${warningLine}${sectionLine}`;
       if (extracted.length > 1) {
-        return `- input/${file.relativePath} (source format: ${format}; ONE source split into ${extracted.length} ordered parts — READ ALL of them: ${extracted.join(", ")}) -> archive ORIGINAL to: ${file.archiveTarget}`;
+        return `- input/${file.relativePath} (source format: ${format}; ONE source split into ${extracted.length} ordered parts — READ ALL of them: ${extracted.join(", ")}) -> archive ORIGINAL to: ${file.archiveTarget}${extras}`;
       }
       if (extracted.length === 1) {
-        return `- input/${file.relativePath} (source format: ${format}; READ extracted text: ${extracted[0]}) -> archive ORIGINAL to: ${file.archiveTarget}`;
+        return `- input/${file.relativePath} (source format: ${format}; READ extracted text: ${extracted[0]}) -> archive ORIGINAL to: ${file.archiveTarget}${extras}`;
       }
-      return `- input/${file.relativePath} (READ directly: ${file.absolutePath}) -> archive to: ${file.archiveTarget}`;
+      return `- input/${file.relativePath} (READ directly: ${file.absolutePath}) -> archive to: ${file.archiveTarget}${extras}`;
     })
     .join("\n");
   const dirs = input.structure.directories.length > 0
@@ -138,7 +156,16 @@ STEP 0 — Cluster inputs by the entity they describe (BEFORE assigning concept 
   as a single document, never as separate sources. For plain text (.txt, .csv,
   .tsv, .json, .yaml, .toml, diagram DSLs, .rst/.adoc/.org), markdown, and
   images, read the original file directly with the read tool (images are read
-  via vision).
+  via vision). For every listed embedded image, read it using the read tool and
+  visually analyze it for knowledge or decorative-only content.
+- Include useful image-derived information in the appropriate concept, associated
+  with its surrounding section and page/slide/sheet when supplied. Summarize
+  charts and diagrams with their main findings and legible values/categories;
+  do not transcribe every mark or repeat already extracted text unless the
+  image provides useful corroboration or visualization. Ignore decorative
+  images as knowledge. Mark uncertain context and unreadable content uncertain;
+  do not guess. Embedded images are temporary visual aids and MUST NOT be copied
+  into the wiki; the archived original document already retains them.
 - Group files that describe the SAME real-world entity. Match on the asserted
   name (e.g. "ALG-32"), canonical resource, or distinctive keywords — NOT on the
   input filename. Files named like foo-2.txt / foo-3.txt are usually VERSIONS of
@@ -212,7 +239,9 @@ move (target already exists), leave the file in input/ and note it under
 member of a cluster once its merged concept file is written.
 
 STEP 4 — If a file cannot be transformed (unreadable, empty, binary without text),
-leave it in input/ and note it in your summary.
+leave it in input/ and note it in your summary. Also include any listed extraction
+limitations or skipped/failed embedded images in the concise transformed note so
+the extension can record them in wiki/log.md; continue with all remaining content.
 
 Input files to transform:
 ${fileList}

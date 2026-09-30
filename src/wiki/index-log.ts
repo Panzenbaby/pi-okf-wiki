@@ -200,11 +200,12 @@ export async function appendLogMd(
   wikiRoot: string,
   date: string,
   diff: WikiDiff,
+  warnings: readonly string[] = [],
 ): Promise<Result<void>> {
   const logPath = join(wikiRoot, "log.md");
   const existing = await readTextFile(logPath);
   const header = `${LOG_TITLE}\n\n`;
-  const entry = buildLogEntry(date, diff);
+  const entry = buildLogEntry(date, diff, warnings);
   if (!existing.success) return writeTextFile(logPath, header + entry);
   // Strip our own title if present, then re-add it above the new entry. A log
   // whose first line is something else (hand-edited, or written by an older
@@ -217,7 +218,7 @@ export async function appendLogMd(
 /** First line of `log.md`. Also the anchor `appendLogMd` splices new entries after. */
 const LOG_TITLE = "# Wiki Update Log";
 
-function buildLogEntry(date: string, diff: WikiDiff): string {
+function buildLogEntry(date: string, diff: WikiDiff, warnings: readonly string[] = []): string {
   const lines: string[] = [`## ${date}`, ""];
   for (const conceptId of diff.created) {
     lines.push(`* **Creation**: Added [${conceptId}](/${conceptId}.md).`);
@@ -231,8 +232,11 @@ function buildLogEntry(date: string, diff: WikiDiff): string {
   for (const removal of diff.removed ?? []) {
     lines.push(`* **Removal**: Removed [${removal.conceptId}](${removal.trashPath}).`);
   }
+  for (const warning of warnings) {
+    lines.push(`* **Warning**: ${warning.replace(/\s+/g, " ").trim()}`);
+  }
   const removedCount = diff.removed?.length ?? 0;
-  if (diff.created.length === 0 && diff.updated.length === 0 && removedCount === 0) {
+  if (diff.created.length === 0 && diff.updated.length === 0 && removedCount === 0 && warnings.length === 0) {
     lines.push("* **No-op**: No concepts changed.");
   }
   // Trailing blank line so the next `## <date>` block is separated from this
