@@ -12,6 +12,11 @@ import {
   extractToTempFile,
 } from "../src/extract/service.ts";
 import { pathExists } from "../src/files.ts";
+import { createChartPng } from "./support/images.ts";
+
+const firstPng = createChartPng(120, 80, 1);
+const secondPng = createChartPng(120, 80, 2);
+const dataUri = (png: Buffer): string => `data:image/png;base64,${png.toString("base64")}`;
 import { resolveArchiveTarget } from "../src/files.ts";
 
 let workdir: string;
@@ -101,11 +106,11 @@ describe("extractToTempFile", () => {
   it("keeps same-stem documents' embedded image paths and bytes distinct", async () => {
     const firstSource = await writeHtml(
       "figures/report.html",
-      '<p>First report</p><img alt="First" src="data:image/png;base64,Zmlyc3QtaW1hZ2U="/>',
+      `<p>First report</p><img alt="First" src="${dataUri(firstPng)}"/>`,
     );
     const secondSource = await writeHtml(
       "figures/report.htm",
-      '<p>Second report</p><img alt="Second" src="data:image/png;base64,c2Vjb25kLWltYWdl"/>',
+      `<p>Second report</p><img alt="Second" src="${dataUri(secondPng)}"/>`,
     );
     const first = await extractToTempFile(inputRoot, "figures/report.html", firstSource);
     const second = await extractToTempFile(inputRoot, "figures/report.htm", secondSource);
@@ -121,8 +126,8 @@ describe("extractToTempFile", () => {
     expect(firstImage.path).not.toBe(secondImage.path);
 
     const { readFile } = await import("node:fs/promises");
-    expect(await readFile(firstImage.path, "utf8")).toBe("first-image");
-    expect(await readFile(secondImage.path, "utf8")).toBe("second-image");
+    expect(await readFile(firstImage.path ?? "")).toEqual(firstPng);
+    expect(await readFile(secondImage.path ?? "")).toEqual(secondPng);
     expect(firstImage.path).toContain("figures/report.html-embedded-image-01.png");
     expect(secondImage.path).toContain("figures/report.htm-embedded-image-01.png");
   });
@@ -130,15 +135,18 @@ describe("extractToTempFile", () => {
   it("stages embedded images separately and preserves the original as archive source", async () => {
     const absolute = await writeHtml(
       "figures/chart.html",
-      '<p>Chart</p><img alt="Signups" src="data:image/png;base64,iVBORw0KGgo="/>',
+      `<p>Chart</p><img alt="Signups" src="${dataUri(firstPng)}"/>`,
     );
     const result = await extractToTempFile(inputRoot, "figures/chart.html", absolute);
     expect(result.success).toBe(true);
     if (!result.success) return;
     expect(result.data.embeddedImages).toHaveLength(1);
     const image = result.data.embeddedImages[0];
+    expect(image?.id).toBe("img-01");
+    expect(image?.status).toBe("staged");
     expect(image?.path).toContain("chart.html-embedded-image-01.png");
-    expect(image?.context).toContain("Signups");
+    expect(image?.occurrences[0]?.context).toContain("Signups");
+    expect(result.data.imageFindingsRelativeName).toBe("figures/chart-image-findings.txt");
     expect(await pathExists(absolute)).toBe(true);
   });
 

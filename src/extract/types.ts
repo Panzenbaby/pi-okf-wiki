@@ -35,6 +35,8 @@ export interface EmbeddedImage {
   readonly context?: string;
   /** Page, slide, sheet, or section identifier, when available. */
   readonly location?: string;
+  /** Package-internal name of the image (e.g. `word/media/image3.png`), for diagnostics. */
+  readonly sourceName?: string;
 }
 
 /**

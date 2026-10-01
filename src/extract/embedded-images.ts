@@ -21,9 +21,14 @@ export interface EmbeddedImageResult {
   readonly warnings: readonly string[];
 }
 
-export const MAX_EMBEDDED_IMAGES = 24;
+/**
+ * Workload caps per document. Images no longer all enter the agent context —
+ * a batched model pre-pass analyzes them (see `src/image-analysis/`) — so the
+ * count cap is generous; the byte caps still bound memory and staging IO.
+ */
+export const MAX_EMBEDDED_IMAGES = 200;
 export const MAX_EMBEDDED_IMAGE_BYTES = 8 * 1024 * 1024;
-export const MAX_EMBEDDED_IMAGE_TOTAL_BYTES = 32 * 1024 * 1024;
+export const MAX_EMBEDDED_IMAGE_TOTAL_BYTES = 96 * 1024 * 1024;
 
 /** Reads references independently so one corrupt image does not discard its siblings. */
 export async function readEmbeddedImages(
@@ -68,6 +73,7 @@ export async function readEmbeddedImages(
       images.push({
         data,
         mediaType,
+        sourceName: reference.file.name,
         ...(reference.context === undefined ? {} : { context: reference.context }),
         ...(reference.location === undefined ? {} : { location: reference.location }),
       });

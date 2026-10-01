@@ -153,6 +153,12 @@ class InputClassifier implements Classifier {
           tempRelativeNames: artifact.tempRelativeNames,
           sourceFormat: artifact.sourceFormat,
           embeddedImages: artifact.embeddedImages,
+          ...(artifact.imageFindingsPath === undefined
+            ? {}
+            : { imageFindingsPath: artifact.imageFindingsPath }),
+          ...(artifact.imageFindingsRelativeName === undefined
+            ? {}
+            : { imageFindingsRelativeName: artifact.imageFindingsRelativeName }),
           extractionWarnings: artifact.warnings,
         });
       } else {

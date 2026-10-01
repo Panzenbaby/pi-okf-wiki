@@ -1,6 +1,6 @@
 {
   "name": "pi-okf-wiki",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "Pi extension that implements the Open Knowledge Format (OKF) as a local knowledge base with /wiki-update and /wiki-query commands.",
   "license": "MIT",
   "type": "module",
@@ -32,7 +32,8 @@
   "scripts": {
     "check": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
-    "prepublishOnly": "tsc --noEmit -p tsconfig.json"
+    "prepublishOnly": "tsc --noEmit -p tsconfig.json",
+    "evaluate:images": "node --experimental-strip-types scripts/evaluate-image-ingestion.ts"
   },
   "dependencies": {
     "exceljs": "^4.4.0",
@@ -44,16 +45,16 @@
     "yaml": "^2.9.0"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": ">=0.85.1"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-coding-agent": "^0.85.1",
     "@types/pngjs": "^6.0.5",
     "typebox": "*",
     "typescript": "^5.9.0",
     "vitest": "^4.1.10"
   },
   "engines": {
-    "pi": ">=0.80.0"
+    "pi": ">=0.85.1"
   }
 }

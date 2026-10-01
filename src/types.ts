@@ -121,14 +121,79 @@ export interface InputFile {
   readonly tempRelativeNames?: readonly string[];
   /** Source format id when extracted (e.g. "docx"). */
   readonly sourceFormat?: string;
-  /** Staged embedded images and reliably available locations; originals remain the archive artifact. */
-  readonly embeddedImages?: readonly {
-    readonly path: string;
-    readonly context?: string;
-    readonly location?: string;
-  }[];
+  /**
+   * Every unique embedded image (deduplicated by SHA-256) with its stable ID,
+   * all document locations, and its ingestion status. Only images with a
+   * `path` were written to the temp tree; originals remain the archive artifact.
+   */
+  readonly embeddedImages?: readonly StagedImage[];
+  /** Temp text file holding the per-image findings (written by the image pre-analysis). */
+  readonly imageFindingsPath?: string;
+  /** `imageFindingsPath` relative to `.okf-extract/` (archived next to the extracted text). */
+  readonly imageFindingsRelativeName?: string;
   /** Non-fatal extractor issues, including image workload/failure limitations. */
   readonly extractionWarnings?: readonly string[];
+}
+
+/**
+ * Lifecycle of one unique embedded image during `/wiki-update`:
+ * - `staged`: written to the temp tree, waiting for analysis (model pre-pass or agent).
+ * - `analyzed`: a finding with knowledge content exists.
+ * - `decorative`: tiny/decorative (deterministic skip or model classification).
+ * - `unreadable`: analyzed, but the content could not be read.
+ * - `broken`: the deterministic quality check rejected the extraction; never sent to a model.
+ * - `failed`: the model pre-pass failed for this image; the agent reads it as a fallback.
+ */
+export type ImageStatus = "staged" | "analyzed" | "decorative" | "unreadable" | "broken" | "failed";
+
+export const IMAGE_STATUSES: readonly ImageStatus[] = [
+  "staged",
+  "analyzed",
+  "decorative",
+  "unreadable",
+  "broken",
+  "failed",
+];
+
+/** One place in the source document where an image appears. */
+export interface ImageOccurrence {
+  /** Page, slide, sheet, or section identifier, when available. */
+  readonly location?: string;
+  /** Nearby text, when it can be associated reliably. */
+  readonly context?: string;
+}
+
+/** Classification a model (or the agent) assigns to an analyzed image. */
+export type ImageFindingClassification = "content" | "decorative" | "unreadable";
+
+/** Structured analysis result for one unique image. */
+export interface ImageFinding {
+  readonly id: string;
+  readonly classification: ImageFindingClassification;
+  readonly description: string;
+  /** Legible values, labels, and categories exactly as shown in the image. */
+  readonly legibleValues: readonly string[];
+  readonly uncertainties: readonly string[];
+}
+
+/** A unique embedded image of one document (identical bytes share one record). */
+export interface StagedImage {
+  /** Stable per-document ID in first-occurrence order, e.g. `img-01`. */
+  readonly id: string;
+  /** Absolute temp path; set only when the image was written for analysis. */
+  readonly path?: string;
+  readonly mediaType: string;
+  readonly byteLength: number;
+  readonly width?: number;
+  readonly height?: number;
+  /** Hex SHA-256 of the image bytes (deduplication key). */
+  readonly sha256: string;
+  /** Every location the image appears at, in document order. */
+  readonly occurrences: readonly ImageOccurrence[];
+  readonly status: ImageStatus;
+  /** Why the image has its status (e.g. the broken-image heuristic that fired). */
+  readonly statusReason?: string;
+  readonly finding?: ImageFinding;
 }
 
 /** Snapshot of the wiki used for diffing before/after an update. */
@@ -148,4 +213,6 @@ export interface UpdateReport {
   readonly hadAgentTurn: boolean;
   /** Non-fatal issues surfaced to the user (e.g. temp-dir cleanup failures). */
   readonly warnings: readonly string[];
+  /** One line per document with embedded images (status counts, missing findings) plus pre-analysis usage. */
+  readonly imageSummaries: readonly string[];
 }

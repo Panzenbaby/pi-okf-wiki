@@ -56,6 +56,18 @@ import {
   type IgnoredEntry,
 } from "./classifier.ts";
 import { compileArchiveRewriter } from "./links.ts";
+import { aggregateWarnings } from "./warnings.ts";
+import { createModelImageAnalysisRepository } from "./image-analysis/repository.ts";
+import {
+  runImagePrepass,
+  writeImageFindings,
+  type ImageAnalysisDocument,
+} from "./image-analysis/prepass.ts";
+import {
+  applyAgentImageOutcomes,
+  parseAgentImageOutcomes,
+  summarizeDocumentImages,
+} from "./image-analysis/completeness.ts";
 
 /**
  * Skip predicate shared by the input walkers: hide the extraction temp dir
@@ -98,6 +110,8 @@ interface IntakeSessionState {
    * prompt, so the agent and the rewriter agree on the destination.
    */
   readonly archiveTargets: ReadonlyMap<string, string>;
+  /** Run-level note about the image pre-analysis (model, calls, token usage), if it ran. */
+  readonly imagePrepassNote?: string;
 }
 
 /**
@@ -127,6 +141,7 @@ class IntakeSessionImpl implements IntakeSession {
   private readonly today: string;
   private readonly preAgentSnapshot: WikiSnapshot;
   private readonly archiveTargets: ReadonlyMap<string, string>;
+  private readonly imagePrepassNote: string | undefined;
 
   constructor(state: IntakeSessionState) {
     this.id = `intake-${++intakeSessionCounter}`;
@@ -140,6 +155,7 @@ class IntakeSessionImpl implements IntakeSession {
     this.today = state.today;
     this.preAgentSnapshot = state.preAgentSnapshot;
     this.archiveTargets = state.archiveTargets;
+    this.imagePrepassNote = state.imagePrepassNote;
   }
 
   handoffToAgent(): void {
@@ -193,7 +209,9 @@ class IntakeSessionImpl implements IntakeSession {
         const archived = await archiveExtractedText(
           this.paths.input,
           this.paths.archive,
-          file.tempRelativeNames,
+          file.imageFindingsRelativeName === undefined
+            ? file.tempRelativeNames
+            : [...file.tempRelativeNames, file.imageFindingsRelativeName],
           resolveArchiveTarget,
         );
         if (!archived.success) {
@@ -215,6 +233,12 @@ class IntakeSessionImpl implements IntakeSession {
     if (!pruned.success) {
       warnings.push(`Could not prune empty input folders: ${pruned.error.message}`);
     }
+    // Completeness: every image ID must end with an outcome. Fallback images
+    // get theirs from the agent's "## Image outcomes" lines; anything still
+    // staged/failed is listed as missing in the per-document summary line.
+    const imageSummaries = summarizeImages(this.nonConformant, event);
+    if (this.imagePrepassNote !== undefined) imageSummaries.push(this.imagePrepassNote);
+    const aggregatedWarnings = aggregateWarnings(warnings);
     const report: UpdateReport = {
       conformantImported: this.conformantImported,
       nonConformantHandedToAgent: this.nonConformant.map((file) => file.relativePath),
@@ -225,14 +249,38 @@ class IntakeSessionImpl implements IntakeSession {
       wikiConceptCountBefore: this.beforeCount,
       wikiConceptCountAfter: afterEntries.size,
       hadAgentTurn: this.hadAgentTurn,
-      warnings,
+      warnings: aggregatedWarnings,
+      imageSummaries,
     };
 
-    await appendLogMd(this.paths.wiki, this.today, diff, warnings);
+    await appendLogMd(this.paths.wiki, this.today, diff, aggregatedWarnings, imageSummaries);
     ctx.ui.setStatus("okf-update", "");
     showSummary(ctx, report);
     return report;
   }
+}
+
+/** Concatenated text of the agent's assistant messages in this turn. */
+function assistantText(event: AgentEndEvent | undefined): string {
+  if (event === undefined) return "";
+  const parts: string[] = [];
+  for (const message of event.messages) {
+    if (message.role !== "assistant") continue;
+    for (const content of message.content) {
+      if (content.type === "text") parts.push(content.text);
+    }
+  }
+  return parts.join("\n");
+}
+
+/** Per-document image completeness lines for the log and the summary widget. */
+function summarizeImages(files: readonly InputFile[], event: AgentEndEvent | undefined): string[] {
+  const documents = files
+    .filter((file) => (file.embeddedImages?.length ?? 0) > 0)
+    .map((file) => ({ relativePath: file.relativePath, images: file.embeddedImages ?? [] }));
+  if (documents.length === 0) return [];
+  const resolved = applyAgentImageOutcomes(documents, parseAgentImageOutcomes(assistantText(event)));
+  return resolved.map(summarizeDocumentImages);
 }
 
 function agentImageWarnings(event: AgentEndEvent | undefined): string[] {
@@ -379,12 +427,19 @@ export async function runUpdate(
   const classifier = createClassifier(paths);
   const classified = await classifier.classify(inputFiles.data);
   if (!classified.success) return classified;
-  const { conformantImported, forAgent, ignored } = classified.data;
-  for (const file of forAgent) {
+  const { conformantImported, ignored } = classified.data;
+  for (const file of classified.data.forAgent) {
     for (const warning of file.extractionWarnings ?? []) {
       runWarnings.push(`${file.relativePath}: ${warning}`);
     }
   }
+
+  // Batched image pre-analysis with the session model, so the agent reads one
+  // findings file per document instead of every image. Never fatal: without an
+  // image-capable model, or for failed batches, the agent reads images itself.
+  const imagePrepass = await preAnalyzeImages(ctx, classified.data.forAgent);
+  const forAgent = imagePrepass.files;
+  for (const warning of imagePrepass.warnings) runWarnings.push(warning);
 
   // Snapshot the wiki AFTER the deterministic classifier run (conformant imports
   // are already on disk) but BEFORE the agent turn. The finalize citation-link
@@ -421,6 +476,7 @@ export async function runUpdate(
       extractedTextPaths: file.extractedTextPaths,
       sourceFormat: file.sourceFormat,
       embeddedImages: file.embeddedImages,
+      imageFindingsPath: file.imageFindingsPath,
       extractionWarnings: file.extractionWarnings,
     });
   }
@@ -436,6 +492,7 @@ export async function runUpdate(
     today,
     preAgentSnapshot: preAgentSnapshot.data,
     archiveTargets,
+    ...(imagePrepass.note === undefined ? {} : { imagePrepassNote: imagePrepass.note }),
   };
 
   if (allNonConformant.length > 0) {
@@ -472,6 +529,68 @@ export async function runUpdate(
   const session = new IntakeSessionImpl(sessionState);
   const report = await session.finalize(ctx);
   return ok(report);
+}
+
+interface ImagePrepassOutcome {
+  readonly files: readonly InputFile[];
+  readonly warnings: readonly string[];
+  readonly note?: string;
+}
+
+/**
+ * Run the batched image pre-analysis for every document with staged images,
+ * write each document's findings file, and return the files with updated
+ * image statuses. Documents whose findings file could not be written lose
+ * their `imageFindingsPath`, so the prompt falls back to listing the images.
+ */
+async function preAnalyzeImages(
+  ctx: ExtensionCommandContext,
+  files: readonly InputFile[],
+): Promise<ImagePrepassOutcome> {
+  const documents: ImageAnalysisDocument[] = files
+    .filter((file) => (file.embeddedImages?.length ?? 0) > 0 && file.imageFindingsPath !== undefined)
+    .map((file) => ({ relativePath: file.relativePath, images: file.embeddedImages ?? [] }));
+  if (documents.length === 0) return { files, warnings: [] };
+
+  const repository = createModelImageAnalysisRepository(ctx.modelRegistry, ctx.model);
+  const result = await runImagePrepass(documents, repository, {
+    ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
+    onProgress: (progress) => {
+      if (!ctx.hasUI) return;
+      ctx.ui.setStatus(
+        "okf-update",
+        `Pre-analyzing images: batch ${progress.completedBatches}/${progress.totalBatches} (${progress.relativePath})`,
+      );
+    },
+  });
+  if (ctx.hasUI) ctx.ui.setStatus("okf-update", "");
+
+  const byPath = new Map(result.documents.map((document) => [document.relativePath, document]));
+  const findingsEntries = files
+    .filter((file) => file.imageFindingsPath !== undefined && byPath.has(file.relativePath))
+    .map((file) => ({
+      document: byPath.get(file.relativePath) ?? { relativePath: file.relativePath, images: [] },
+      findingsPath: file.imageFindingsPath ?? "",
+    }));
+  const written = await writeImageFindings(findingsEntries, result.modelLabel);
+  const failedWrites = written.failedDocuments;
+  const updatedFiles = files.map((file): InputFile => {
+    const document = byPath.get(file.relativePath);
+    if (document === undefined) return file;
+    if (failedWrites.has(file.relativePath)) {
+      const { imageFindingsPath: _unwritten, imageFindingsRelativeName: _unarchived, ...rest } = file;
+      return { ...rest, embeddedImages: document.images };
+    }
+    return { ...file, embeddedImages: document.images };
+  });
+  const note = result.modelCalls === 0 || result.modelLabel === undefined
+    ? undefined
+    : `Pre-analysis: ${result.modelCalls} batch call(s) to ${result.modelLabel}; ${result.usage.inputTokens} input / ${result.usage.outputTokens} output tokens${result.usage.cost > 0 ? `, cost ${result.usage.cost.toFixed(4)}` : ""}.`;
+  return {
+    files: updatedFiles,
+    warnings: [...result.warnings, ...written.warnings],
+    ...(note === undefined ? {} : { note }),
+  };
 }
 
 async function ensureAllDirs(paths: WikiPaths): Promise<Result<void>> {
@@ -540,6 +659,7 @@ function emptyReport(conceptCount: number): UpdateReport {
     wikiConceptCountAfter: conceptCount,
     hadAgentTurn: false,
     warnings: [],
+    imageSummaries: [],
   };
 }
 
@@ -576,6 +696,10 @@ function showSummary(ctx: ExtensionContext, report: UpdateReport): void {
   if (report.leftover.length > 0) {
     lines.push("  Leftover in input/ (agent did not finish):");
     for (const path of report.leftover) lines.push(`    ! ${path}`);
+  }
+  if (report.imageSummaries.length > 0) {
+    lines.push("  Images:");
+    for (const summary of report.imageSummaries) lines.push(`    • ${summary}`);
   }
   if (report.warnings.length > 0) {
     lines.push("  Warnings:");

@@ -69,8 +69,9 @@ pi -e /path/to/pi-okf-wiki
 }
 ```
 
-After installing, (re)start Pi in your project and the two commands are
-available. Reload after upgrading with `/reload`.
+After installing, (re)start Pi in your project and the commands are available.
+This release requires Pi **0.85.1 or newer** for nested model calls used by
+batched image analysis. Reload after upgrading with `/reload`.
 
 ## How `/wiki-update` works
 
@@ -85,10 +86,14 @@ available. Reload after upgrading with `/reload`.
    frontmatter or a non-empty `type` field; plain text and images read directly
    by Pi's `read` tool; and binary/structured documents which the extension
    **pre-extracts text** into a temp
-   `input/.okf-extract/<relative-dir>/` and hands the text plus supported
-   embedded images to the agent (see [Supported formats](#supported-formats)).
-   The images are staged temporarily for visual inspection, never copied into
-   wiki concepts, and the original document retains them in the archive. These are handed to
+   `input/.okf-extract/<relative-dir>/` and hands the text plus an **image
+   findings file** to the agent (see [Supported formats](#supported-formats)
+   and [How embedded images are processed](#how-embedded-images-are-processed)).
+   Embedded images are deduplicated, quality-checked, and pre-analyzed in
+   batches by the session model before the agent turn, so the agent reads one
+   compact findings file per document instead of every image. Images are staged
+   temporarily, never copied into wiki concepts, and the original document
+   retains them in the archive. These are handed to
    the agent, which reads every non-conformant file, **clusters** those
    describing the same real-world entity (matched on asserted name / resource /
    keywords, not on filename), and writes **one OKF concept per cluster**
@@ -105,7 +110,8 @@ available. Reload after upgrading with `/reload`.
    `empty`, `io_failed`) and left in `input/`.
 
 After the agent turn, the extension regenerates `index.md`, appends a dated
-entry to `log.md` (including extraction/analysis limitations), **rewrites `/archive/<input-relative-path>` placeholder
+entry to `log.md` (including one **Images** completeness line per document and
+de-duplicated extraction/analysis limitations), **rewrites `/archive/<input-relative-path>` placeholder
 citation links** in the agent-written concepts to the actual (collision-renamed)
 archive paths (so a UI can jump straight to the archived original even when it
 was renamed during the move), detects any files still left in `input/` (the
@@ -137,7 +143,7 @@ OKF /wiki-update summary
 | Conformant (deterministic) | `.md` / `.markdown` with frontmatter `type` | Copied to `wiki/` directly, no LLM. |
 | Plain text (read directly) | `.txt`, `.csv`, `.tsv`, `.json`, `.yaml`/`.yml`, `.toml`, `.dsl`, `.mmd`/`.mermaid`, `.puml`/`.plantuml`, `.dot`/`.gv`, `.rst`, `.adoc`/`.asciidoc`, `.org` | Pi's `read` tool. |
 | Images (vision) | `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.bmp` | Pi's `read` tool. |
-| Extracted to text + embedded images | `.pdf`, `.docx`, `.pptx`, `.xlsx`, `.odt`, `.ods`, `.odp`, `.html`/`.htm`, `.epub`, `.rtf`, `.jsonl`/`.ndjson`, `.ipynb` | Text is staged at `input/.okf-extract/<rel-dir>/<stem>-extracted.txt`; supported embedded raster images are staged separately in the same temp tree and read via vision. Original documents (with embedded images) and extracted text are archived; temporary image copies are discarded. |
+| Extracted to text + embedded images | `.pdf`, `.docx`, `.pptx`, `.xlsx`, `.odt`, `.ods`, `.odp`, `.html`/`.htm`, `.epub`, `.rtf`, `.jsonl`/`.ndjson`, `.ipynb` | Text is staged at `input/.okf-extract/<rel-dir>/<stem>-extracted.txt`; embedded raster images are staged in the same temp tree, pre-analyzed by the session model, and summarized in `<stem>-image-findings.txt`, which the agent reads. Original documents (with embedded images), extracted text, and the findings file are archived; temporary image copies are discarded. |
 
 The plain-text bucket is a deliberate allowlist, not a "does it decode as
 text?" sniff — sniffing would swallow lockfiles, keys and minified bundles,
@@ -145,21 +151,97 @@ and `unsupported` is a more useful signal. `.dsl` covers diagram/architecture
 DSLs (including the text Miro's MCP tools read and write) and is intentionally
 not parsed: that grammar is served at runtime and versioned server-side.
 
-Embedded raster images are visually analyzed alongside extracted text for the
-formats that can carry them (PDF, DOCX, PowerPoint and OpenDocument packages,
-Excel workbooks, HTML data URIs, EPUB, RTF, and notebook outputs). Image counts
-and sizes are bounded; failures/skips are non-fatal and recorded as warnings in
-`wiki/log.md`. Findings are associated with a page/slide/sheet/section where
-reliably available. Decorative images are ignored as knowledge and uncertain or
-unreadable details are not guessed. External HTML images (remote URLs) are not
-downloaded.
+Embedded raster images are analyzed alongside extracted text for the formats
+that can carry them (PDF, DOCX, PowerPoint and OpenDocument packages, Excel
+workbooks, HTML data URIs, EPUB, RTF, and notebook outputs). Findings are
+associated with a page/slide/sheet/section where reliably available. Decorative
+images are ignored as knowledge and uncertain or unreadable details are not
+guessed. External HTML images (remote URLs) are not downloaded. See
+[How embedded images are processed](#how-embedded-images-are-processed).
+
+### How embedded images are processed
+
+All formats share one pipeline (`src/extract/service.ts` +
+`src/image-analysis/`):
+
+1. **Collect in document order.** Each repository returns image occurrences
+   with location and surrounding text. DOCX images are read directly from the
+   package: `word/document.xml` is walked with an XML tokenizer and every
+   `a:blip` / `v:imagedata` reference (inline, anchored `wp:anchor`, grouped
+   `wpg:wgp`, inside text boxes, VML) is resolved through
+   `word/_rels/document.xml.rels`. Paragraphs nested in text boxes stay part
+   of their host paragraph; for `mc:AlternateContent` the `mc:Choice` wins and
+   `mc:Fallback` pictures are used only when the choice has no image. Simple
+   header/footer images are appended after the body.
+2. **Deduplicate and ID.** Identical bytes (SHA-256) are analyzed once; every
+   location is kept. Each unique image gets a stable per-document ID in
+   first-occurrence order (`img-01`, `img-02`, …).
+3. **Deterministic quality check** (`src/extract/image-inspection.ts`):
+   - *Tiny → `decorative`*: both sides < 32 px, any side < 8 px (rules/lines),
+     or — when the format's dimensions cannot be read — fewer than 512 bytes.
+   - *Broken → `broken`* (never sent to a model): a header that does not match
+     the media type, an undecodable PNG, aspect ratio > 40:1, a near-uniform
+     PNG (luminance standard deviation < 2), **incoherent pixel
+     neighbourhoods** (mean RGBA difference between horizontally adjacent
+     pixels ≥ 1.15 × the difference three pixels apart, and ≥ 12 — real
+     screenshots/charts measure 0.45–0.65, mis-decoded pixel data such as RGB
+     read as RGBA measures 1.3–2.8), or **row striping** (adjacent rows ≥ 0.93
+     × as different as rows two apart, and ≥ 40). Pixel rules run on PNGs only
+     (240 sampled rows); other formats get the header/size checks.
+4. **Batched model pre-pass.** Remaining images are sent to the **current
+   session model** via nested calls (`ctx.modelRegistry.complete`), 5 images
+   per call (≤ 12 MB raw per call, 3 calls in flight). Each image is preceded
+   by its ID, location, and surrounding text; the model returns one structured
+   finding per ID: classification (`content` / `decorative` / `unreadable`),
+   description, legible values/labels/categories, and uncertainties — no
+   guessing. Progress is shown in the status bar; token usage is logged.
+5. **Findings file.** Per document, `<stem>-image-findings.txt` lists every
+   image ID with its status, locations, and finding. The agent reads this file;
+   staged image paths are only listed for optional spot checks.
+6. **Fallback.** Without an image-capable model or configured auth — or for a
+   failed batch, a missing finding, or an image over 5 MB — the affected images
+   keep the previous behaviour: the agent reads them with the `read` tool (at
+   most 24 per document) and reports each under `## Image outcomes`. A failed
+   batch never aborts the update. This fallback cap also applies if nested model
+   calls are unavailable at runtime; any remaining images are explicitly listed
+   as missing in the completeness summary rather than silently treated as read.
+7. **Completeness.** Every image ID ends with a status: `analyzed`,
+   `decorative`, `unreadable`, `broken`, or — when nothing analyzed it —
+   `staged`/`failed`. Finalize writes one line per document to `wiki/log.md`,
+   e.g. `* **Images**: report.docx: 41 occurrence(s), 39 unique — staged 0,
+   analyzed 38, decorative 1, unreadable 0, broken 0, failed 0; missing
+   findings: none`. Repeated warnings are aggregated (`… (×17)`).
+
+Workload caps (named constants): 200 images per document
+(`MAX_EMBEDDED_IMAGES`, `MAX_PDF_IMAGE_COUNT`, `MAX_STAGED_EMBEDDED_IMAGES`),
+8 MB per packaged image / 16 MB per staged image, 96 MB per document, and a
+16-megapixel cap for PDF images. Skips are non-fatal and logged.
+
+#### Evaluating image ingestion
+
+`scripts/evaluate-image-ingestion.ts` reports, per document, how many images
+were found, associated with context, deduplicated, skipped as tiny, flagged
+broken, and staged. Documents are read in place (never copied into the repo):
+
+```bash
+npm run evaluate:images -- path/to/report.docx path/to/paper.pdf --verbose
+# Run the batched pre-pass against a model and check expected values:
+npm run evaluate:images -- path/to/paper.pdf --live \
+  --ground-truth scripts/examples/ki-processing-evaluation.ground-truth.json
+```
+
+`--live` uses Pi's default model from `~/.pi/agent/settings.json` (override
+with `--provider` / `--model`) and loads the installed Pi SDK (override with
+`--pi-sdk <path/to/pi-coding-agent/dist/index.js>`). Ground-truth files map a
+document file name to `expectedValues` (strings, or lists of alternatives)
+that must appear in the findings.
 
 Extraction libraries (runtime dependencies of the extension):
 
 | Format | Library |
 | --- | --- |
 | `.pdf` | [`unpdf`](https://www.npmjs.com/package/unpdf) + [`pngjs`](https://www.npmjs.com/package/pngjs) |
-| `.docx` | [`mammoth`](https://www.npmjs.com/package/mammoth) |
+| `.docx` | [`mammoth`](https://www.npmjs.com/package/mammoth) (text) + [`jszip`](https://www.npmjs.com/package/jszip) (images and charts, read from the package) |
 | `.xlsx` | [`exceljs`](https://www.npmjs.com/package/exceljs) (rendered as markdown tables) |
 | `.pptx` / `.odt` / `.ods` / `.odp` / `.epub` | [`jszip`](https://www.npmjs.com/package/jszip) + XML readers (`.ods` keeps rows/columns as markdown tables, `.odp` keeps slide boundaries) |
 | `.html` | [`html-to-text`](https://www.npmjs.com/package/html-to-text) |
@@ -400,12 +482,19 @@ leaks outside its repository.
 | `src/links.ts` | Pure link rewriters (no IO). `compileArchiveRewriter` / `rewriteArchiveCitationLinks` rewrite `/archive/<input-relative-path>` placeholders to the actual (post-rename) archive path across the WHOLE document — in v0.2 those placeholders live in `sources[].resource` frontmatter values, not only in body links. `compileRemovedConceptRewriter` / `conceptIdFromLinkTarget` resolve any spelling of a concept reference (root-relative, `wiki/`-prefixed, or relative to the citing file) to a conceptId and redirect removed ones to their `/trash/` path, in body links and frontmatter `resource:` values alike. `collectConceptReferences` is the read-only counterpart used by the removal preview, so preview and rewriter cannot drift apart. |
 | `src/migrate.ts` | `/wiki-migrate` logic: deterministic v0.1→v0.2 concept rewriting (`timestamp`→`generated`, body `# Citations`→`sources`, legacy `status` values→the §5.4 lifecycle). No agent turn; already-current concepts stay byte-identical and a no-op run writes nothing. |
 | `src/remove.ts` | `/wiki-remove` logic: `planRemoval` (what would be affected, incl. incoming references from bodies and from frontmatter `resource:` values — no mutation) and `removeFromWiki` (move to trash, redirect links, regenerate `index.md`, append the `Removal` log entry, collapse emptied directories). Deterministic, no agent turn. |
-| `src/update.ts` | `/wiki-update` command logic and the `IntakeSession` (finalize) that owns the agent-handoff state, including the post-agent citation-link rewrite (`rewriteArchiveCitationsInConcepts`). |
+| `src/update.ts` | `/wiki-update` command logic and the `IntakeSession` (finalize) that owns the agent-handoff state, including the image pre-analysis hand-off (`preAnalyzeImages`), the per-document image completeness lines, and the post-agent citation-link rewrite (`rewriteArchiveCitationsInConcepts`). |
+| `src/warnings.ts` | `aggregateWarnings`: collapses repeated warnings into one line with a `(×N)` count. |
+| `src/image-analysis/repository.ts` | `ImageAnalysisRepository` — wraps the session model's nested completion (`ctx.modelRegistry.complete`); registry/model/message Dtos stay inside. Availability checks (model, image input, auth, API). Returns findings + token usage as `Result`. |
+| `src/image-analysis/batch-prompt.ts` | Batch prompt text and tolerant JSON parsing of per-image findings. |
+| `src/image-analysis/prepass.ts` | Batch planning, the bounded-concurrency pre-pass with per-batch fallback, findings-file rendering, and the agent-fallback selection. |
+| `src/image-analysis/completeness.ts` | Parses the agent's `## Image outcomes`, applies them, and renders the per-document completeness line. |
 | `src/classifier.ts` | `InputClassifier` that owns the full input→bucket pipeline AND the deterministic conformant intake: tentative dispatch by extension, the extraction pass (staging extracted text), and pass 3 — read + verify frontmatter + write to `wiki/` + archive original — for conformant `.md` files. Emits the three final buckets (`conformantImported` / `forAgent` / `ignored`) once, in input order. |
 | `src/query.ts` | `/wiki-query` command logic and the `QuerySession` that owns the pending question. Both `buildWikiQueryContext` and `runQuery` take an optional `Retriever` (default `TermFrequencyRetriever`) so the scoring strategy is injectable. |
-| `src/extract/types.ts` | `ExtractedText` / `EmbeddedImage` AppModels, `DocumentExtractorRepository` interface, extraction-failure cause codes. |
-| `src/extract/pdf.ts` | `PdfRepository` (`unpdf` + `pngjs`), with per-page image extraction and bounded PNG encoding. |
-| `src/extract/docx.ts` | `DocxRepository` (`mammoth`), including contextual embedded image extraction. |
+| `src/extract/types.ts` | `ExtractedText` / `EmbeddedImage` AppModels, `DocumentExtractorRepository` interface, extraction-failure cause codes. (`StagedImage`, `ImageStatus`, and `ImageFinding` live in `src/types.ts`.) |
+| `src/extract/image-inspection.ts` | Model-free image inspection: header dimensions, tiny/decorative detection, and the broken-extraction heuristic. |
+| `src/extract/pdf.ts` | `PdfRepository` (`unpdf` + `pngjs`), with per-page image extraction and bounded PNG encoding (`encodePng` passes the raw pixel layout to the packer). |
+| `src/extract/docx.ts` | `DocxRepository` (`mammoth` for text) plus charts and images from the package. |
+| `src/extract/docx-images.ts` | Document-order DOCX image collection: XML walk of `word/document.xml` (inline/anchored/grouped/text-box/VML, `mc:AlternateContent`), relationship resolution, section/paragraph context, headers/footers. |
 | `src/extract/sheet.ts` | `SheetRepository` (`exceljs`), rendering worksheets as markdown tables. |
 | `src/extract/office-xml.ts` | `PptxRepository`, `OdtRepository`, `OdsRepository`, `OdpRepository`, `EpubRepository` (shared `jszip` + XML helpers and contextual packaged image extraction). |
 | `src/extract/html.ts` | `HtmlRepository` (`html-to-text`), including embedded data-URI images. |
@@ -413,7 +502,7 @@ leaks outside its repository.
 | `src/extract/jsonl.ts` | `JsonLinesRepository` (`.jsonl`/`.ndjson`), the only extractor that splits its output into parts. |
 | `src/extract/notebook.ts` | `NotebookRepository` (`.ipynb`), markdown + code cells and image outputs. |
 | `src/extract/registry.ts` | Format taxonomy + `ExtractorRegistry` dispatch. |
-| `src/extract/service.ts` | Text/image extraction-to-temp-file orchestration and the `.okf-extract/` lifecycle. |
+| `src/extract/service.ts` | Text/image extraction-to-temp-file orchestration and the `.okf-extract/` lifecycle; image cataloguing (SHA-256 dedupe, IDs, quality check, staging statistics). |
 | `src/extract/util.ts` | Shared `Result<T>` failure + error-message helpers for repositories. |
 
 ### Development
@@ -421,11 +510,15 @@ leaks outside its repository.
 ```bash
 npm install          # installs peer/dev deps for type-checking
 npm run check        # tsc --noEmit (strict, noUnusedLocals)
+npm test             # vitest (synthetic fixtures, no network)
+npm run evaluate:images -- <documents…>   # image ingestion report (see above)
 ```
 
 The extension imports `@earendil-works/pi-coding-agent` only as type-only
-imports (erased at runtime). Runtime dependencies are installed from
-`package.json` and are not bundled.
+imports (erased at runtime); the active Pi runtime provides its APIs. The
+extension requires Pi 0.85.1 or newer for nested model calls, and the peer
+SDK requirement is declared in `package.json`. Runtime dependencies are
+installed from `package.json` and are not bundled.
 
 ## License
 

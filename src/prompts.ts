@@ -2,7 +2,14 @@
 // asked to reply in the same language as the user's input (the question for
 // /wiki-query, the transformed content for /wiki-update).
 
+import { IMAGE_STATUSES, type StagedImage } from "./types.ts";
 import type { StructurePreview } from "./wiki.ts";
+import { IMAGE_OUTCOMES_HEADING } from "./image-analysis/completeness.ts";
+import {
+  MAX_AGENT_FALLBACK_IMAGES,
+  countImageStatuses,
+  selectAgentFallbackImages,
+} from "./image-analysis/prepass.ts";
 
 /**
  * The provenance rule (OKF v0.2 §5.1), stated ONCE and interpolated into both
@@ -88,11 +95,10 @@ export interface UpdatePromptInput {
     extractedTextPaths?: readonly string[];
     /** Source format id when extracted (e.g. "docx"). */
     sourceFormat?: string;
-    embeddedImages?: readonly {
-      readonly path: string;
-      readonly context?: string;
-      readonly location?: string;
-    }[];
+    /** Unique embedded images with IDs, statuses, and (when pre-analyzed) findings. */
+    embeddedImages?: readonly StagedImage[];
+    /** Findings file the agent reads instead of the raw images. */
+    imageFindingsPath?: string;
     extractionWarnings?: readonly string[];
   }>;
   readonly archiveDir: string;
@@ -106,14 +112,12 @@ export function buildUpdatePrompt(input: UpdatePromptInput): string {
       const extracted = file.extractedTextPaths ?? [];
       const format = file.sourceFormat ?? "unknown";
       const imageEntries = file.embeddedImages ?? [];
-      const imageLine = imageEntries.length > 0
-        ? `\n  Embedded images (${imageEntries.length}; inspect with the read tool):\n${imageEntries.map((image) => `    - ${image.path}${image.location === undefined ? "" : ` — ${image.location}`}${image.context === undefined ? "" : `; surrounding text: ${image.context}`}`).join("\n")}`
-        : "";
+      const imageLine = renderImageLines(file.relativePath, imageEntries, file.imageFindingsPath);
       const extractionWarnings = file.extractionWarnings ?? [];
       const warningLine = extractionWarnings.length > 0
         ? `\n  Extraction limitations (record these in the update log): ${extractionWarnings.join("; ")}`
         : "";
-      const sectionLine = imageEntries.length > 0
+      const sectionLine = imageEntries.some((image) => image.status !== "broken")
         ? `\n  Context requirements: associate findings with surrounding sections and page/slide/sheet when available; state unreadable content or uncertain context without guessing.`
         : "";
       const extras = `${imageLine}${warningLine}${sectionLine}`;
@@ -156,8 +160,15 @@ STEP 0 — Cluster inputs by the entity they describe (BEFORE assigning concept 
   as a single document, never as separate sources. For plain text (.txt, .csv,
   .tsv, .json, .yaml, .toml, diagram DSLs, .rst/.adoc/.org), markdown, and
   images, read the original file directly with the read tool (images are read
-  via vision). For every listed embedded image, read it using the read tool and
-  visually analyze it for knowledge or decorative-only content.
+  via vision).
+- Embedded images of extracted documents were PRE-ANALYZED by the extension:
+  READ the listed "image findings" file for each such document — it holds one
+  finding per image ID (description, legible values, uncertainties, status).
+  Do NOT read every raw image; the staged image paths in the findings file are
+  only for optional spot checks of a doubtful finding. Images listed as "NOT
+  pre-analyzed" MUST be read with the read tool and visually analyzed for
+  knowledge or decorative-only content. Images marked broken or decorative
+  carry no knowledge.
 - Include useful image-derived information in the appropriate concept, associated
   with its surrounding section and page/slide/sheet when supplied. Summarize
   charts and diagrams with their main findings and legible values/categories;
@@ -250,8 +261,39 @@ When done, output a concise summary section titled "## Transformed"
 with one bullet per transformed concept: \`<concept-id>\` — <title> — one-line
 note (mention merged source count and any conflicts, e.g. "merged 3 sources;
 conflict on colour -> canonical green (latest)"). Then a "## Skipped" section
-for files you could not transform.
+for files you could not transform. If any image was listed as "NOT
+pre-analyzed", add a "${IMAGE_OUTCOMES_HEADING}" section with one line per such
+image: \`- <input-relative-path> <image-id>: content|decorative|unreadable — short note\`
+(e.g. \`- reports/q3.docx img-07: content — revenue by quarter\`).
 Reply in the same language as the content you transformed.`;
+}
+
+/** Image block of one file entry: findings file + images the agent must read itself. */
+function renderImageLines(
+  relativePath: string,
+  images: readonly StagedImage[],
+  findingsPath: string | undefined,
+): string {
+  if (images.length === 0) return "";
+  const counts = countImageStatuses(images);
+  const occurrences = images.reduce((count, image) => count + image.occurrences.length, 0);
+  const statusText = IMAGE_STATUSES.filter((status) => counts[status] > 0).map((status) => `${status} ${counts[status]}`).join(", ");
+  const lines: string[] = [`\n  Embedded images: ${images.length} unique (${occurrences} occurrence(s)) — ${statusText}.`];
+  const fallbackImages = findingsPath === undefined
+    ? images.filter((image) => image.path !== undefined && image.status !== "broken" && image.status !== "decorative").slice(0, MAX_AGENT_FALLBACK_IMAGES)
+    : selectAgentFallbackImages(images);
+  if (findingsPath !== undefined) {
+    lines.push(`\n  Image findings (READ this file instead of the images): ${findingsPath}`);
+  }
+  if (fallbackImages.length > 0) {
+    lines.push(`\n  Images NOT pre-analyzed (READ each with the read tool; report each under "${IMAGE_OUTCOMES_HEADING}" as \`${relativePath} <image-id>: ...\`):`);
+    for (const image of fallbackImages) {
+      const location = image.occurrences[0]?.location;
+      const context = image.occurrences[0]?.context;
+      lines.push(`\n    - ${image.id}: ${image.path ?? ""}${location === undefined ? "" : ` — ${location}`}${context === undefined ? "" : `; surrounding text: ${context}`}`);
+    }
+  }
+  return lines.join("");
 }
 
 export interface QueryPromptInput {

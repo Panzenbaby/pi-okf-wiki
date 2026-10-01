@@ -9,10 +9,20 @@
 import { join } from "node:path";
 import { mkdir, writeFile } from "node:fs/promises";
 
+import { createHash } from "node:crypto";
+
 import { copyFile, pathExists, removeDir, writeTextFile } from "../files.ts";
-import { ok, type Result } from "../types.ts";
+import {
+  ok,
+  type ImageOccurrence,
+  type ImageStatus,
+  type Result,
+  type StagedImage,
+} from "../types.ts";
+import { aggregateWarnings } from "../warnings.ts";
+import { inspectImage } from "./image-inspection.ts";
 import { extractFile } from "./registry.ts";
-import type { ExtractedText } from "./types.ts";
+import type { EmbeddedImage, ExtractedText } from "./types.ts";
 
 /**
  * A successfully extracted text artifact staged for the agent to read.
@@ -28,23 +38,135 @@ export interface ExtractedArtifact {
   readonly tempRelativeNames: readonly string[];
   /** Source format id (e.g. "docx"). */
   readonly sourceFormat: string;
-  /** Staged images with any reliable document location/context association. */
-  readonly embeddedImages: readonly StagedEmbeddedImage[];
-  /** Non-fatal issues from text/image extraction or image staging. */
+  /** Unique embedded images (deduplicated) with stable IDs, locations, and status. */
+  readonly embeddedImages: readonly StagedImage[];
+  /** Counters describing how the embedded images were processed. */
+  readonly imageStatistics: ImageStagingStatistics;
+  /**
+   * Where the image findings file for this document goes (absolute and
+   * relative to `.okf-extract/`). Set only when the document has images.
+   */
+  readonly imageFindingsPath?: string;
+  readonly imageFindingsRelativeName?: string;
+  /** Non-fatal issues from text/image extraction or image staging (aggregated). */
   readonly warnings: readonly string[];
 }
 
 /** Directory name (inside `input/`) where extracted text is staged. */
 export const EXTRACTION_TEMP_DIR = ".okf-extract";
 
-const MAX_STAGED_EMBEDDED_IMAGES = 24;
-const MAX_STAGED_IMAGE_BYTES = 8 * 1024 * 1024;
-const MAX_STAGED_TOTAL_IMAGE_BYTES = 32 * 1024 * 1024;
+/** Unique images staged per document (duplicates do not count). */
+export const MAX_STAGED_EMBEDDED_IMAGES = 200;
+export const MAX_STAGED_IMAGE_BYTES = 16 * 1024 * 1024;
+export const MAX_STAGED_TOTAL_IMAGE_BYTES = 96 * 1024 * 1024;
 
-export interface StagedEmbeddedImage {
-  readonly path: string;
-  readonly context?: string;
-  readonly location?: string;
+/** How the embedded images of one document were processed. */
+export interface ImageStagingStatistics {
+  /** Image occurrences delivered by the extractor (before deduplication). */
+  readonly occurrences: number;
+  /** Occurrences that carry surrounding-text context. */
+  readonly occurrencesWithContext: number;
+  /** Unique images after SHA-256 deduplication. */
+  readonly unique: number;
+  /** Occurrences folded into an earlier identical image. */
+  readonly duplicates: number;
+  /** Unique images skipped as tiny (recorded as `decorative`). */
+  readonly tiny: number;
+  /** Unique images rejected by the broken-image heuristic. */
+  readonly broken: number;
+  /** Unique images written to the temp tree for analysis. */
+  readonly staged: number;
+  /** Unique images dropped by staging limits or write errors (no record). */
+  readonly dropped: number;
+}
+
+/** One catalogued unique image, still holding its bytes (before staging). */
+export interface CatalogedImage {
+  readonly record: StagedImage;
+  readonly data: Uint8Array;
+}
+
+export interface ImageCatalog {
+  readonly images: readonly CatalogedImage[];
+  readonly warnings: readonly string[];
+  readonly duplicates: number;
+}
+
+/**
+ * Deduplicate embedded images by SHA-256 (first occurrence wins the ID, later
+ * occurrences are added as extra locations), assign stable IDs (`img-01`, …),
+ * and run the deterministic inspection: tiny images become `decorative`,
+ * broken extractions become `broken`, everything else is `staged`. Pure — no IO.
+ */
+export function catalogEmbeddedImages(
+  payloads: readonly EmbeddedImage[],
+  format: string,
+): ImageCatalog {
+  const images: CatalogedImage[] = [];
+  const bySha = new Map<string, number>();
+  const occurrencesById = new Map<number, ImageOccurrence[]>();
+  const warnings: string[] = [];
+  let duplicates = 0;
+  let acceptedBytes = 0;
+  for (const payload of payloads) {
+    const sha256 = createHash("sha256").update(payload.data).digest("hex");
+    const occurrence: ImageOccurrence = {
+      ...(payload.location === undefined ? {} : { location: payload.location }),
+      ...(payload.context === undefined ? {} : { context: payload.context }),
+    };
+    const existing = bySha.get(sha256);
+    if (existing !== undefined) {
+      duplicates++;
+      occurrencesById.get(existing)?.push(occurrence);
+      continue;
+    }
+    if (images.length >= MAX_STAGED_EMBEDDED_IMAGES) {
+      warnings.push(`${format}: skipped further unique embedded images after the ${MAX_STAGED_EMBEDDED_IMAGES}-image staging limit.`);
+      continue;
+    }
+    if (payload.data.byteLength > MAX_STAGED_IMAGE_BYTES) {
+      warnings.push(`${format}: skipped an oversized embedded image during staging (over ${MAX_STAGED_IMAGE_BYTES} bytes).`);
+      continue;
+    }
+    if (acceptedBytes + payload.data.byteLength > MAX_STAGED_TOTAL_IMAGE_BYTES) {
+      warnings.push(`${format}: skipped further embedded images after the ${MAX_STAGED_TOTAL_IMAGE_BYTES}-byte staging limit.`);
+      continue;
+    }
+    if (imageExtension(payload.mediaType) === undefined) {
+      warnings.push(`${format}: could not stage an embedded image with unsupported media type ${payload.mediaType}.`);
+      continue;
+    }
+    acceptedBytes += payload.data.byteLength;
+    const index = images.length;
+    const occurrences: ImageOccurrence[] = [occurrence];
+    occurrencesById.set(index, occurrences);
+    bySha.set(sha256, index);
+    const inspection = inspectImage(payload.data, payload.mediaType);
+    const status: ImageStatus = inspection.verdict.kind === "tiny"
+      ? "decorative"
+      : inspection.verdict.kind === "broken" ? "broken" : "staged";
+    images.push({
+      data: payload.data,
+      record: {
+        id: imageId(index + 1),
+        mediaType: payload.mediaType,
+        byteLength: payload.data.byteLength,
+        sha256,
+        occurrences,
+        status,
+        ...(inspection.dimensions === undefined ? {} : { width: inspection.dimensions.width, height: inspection.dimensions.height }),
+        ...(inspection.verdict.kind === "content"
+          ? {}
+          : { statusReason: inspection.verdict.kind === "tiny" ? `tiny image (${inspection.verdict.reason})` : inspection.verdict.reason }),
+      },
+    });
+  }
+  return { images, warnings, duplicates };
+}
+
+/** Stable per-document image ID, e.g. `img-01`. */
+export function imageId(number: number): string {
+  return `img-${String(number).padStart(2, "0")}`;
 }
 
 /**
@@ -86,59 +208,57 @@ export async function extractToTempFile(
     extractedTextPaths.push(path);
   }
 
-  const embeddedImages: StagedEmbeddedImage[] = [];
-  let stagedImageBytes = 0;
-  const embeddedImagePayloads = extracted.data.embeddedImages ?? [];
-  for (let index = 0; index < embeddedImagePayloads.length; index++) {
-    if (embeddedImages.length >= MAX_STAGED_EMBEDDED_IMAGES) {
-      warnings.push(`${extracted.data.sourceFormat}: skipped ${embeddedImagePayloads.length - index} embedded images after the ${MAX_STAGED_EMBEDDED_IMAGES}-image staging limit.`);
-      break;
-    }
-    const image = embeddedImagePayloads[index];
-    if (image === undefined) continue;
-    if (image.data.byteLength > MAX_STAGED_IMAGE_BYTES) {
-      warnings.push(`${extracted.data.sourceFormat}: skipped oversized embedded image ${index + 1} during staging.`);
+  const payloads = extracted.data.embeddedImages ?? [];
+  const catalog = catalogEmbeddedImages(payloads, extracted.data.sourceFormat);
+  for (const warning of catalog.warnings) warnings.push(warning);
+  const embeddedImages: StagedImage[] = [];
+  const imageRoot = join(inputRoot, EXTRACTION_TEMP_DIR);
+  let dropped = 0;
+  for (const [index, entry] of catalog.images.entries()) {
+    if (entry.record.status !== "staged") {
+      embeddedImages.push(entry.record);
       continue;
     }
-    if (stagedImageBytes + image.data.byteLength > MAX_STAGED_TOTAL_IMAGE_BYTES) {
-      warnings.push(`${extracted.data.sourceFormat}: skipped remaining images after the ${MAX_STAGED_TOTAL_IMAGE_BYTES}-byte staging limit.`);
-      break;
-    }
-    const extension = imageExtension(image.mediaType);
-    if (extension === undefined) {
-      warnings.push(`${extracted.data.sourceFormat}: could not stage an embedded image with unsupported media type ${image.mediaType}.`);
+    const extension = imageExtension(entry.record.mediaType) ?? "bin";
+    const imagePath = join(imageRoot, imageRelativeName(relativePath, index + 1, extension));
+    if (!imagePath.startsWith(`${imageRoot}/`)) {
+      warnings.push(`${extracted.data.sourceFormat}: skipped embedded image with unsafe generated path.`);
+      dropped++;
       continue;
     }
-    const imagePath = join(
-      inputRoot,
-      EXTRACTION_TEMP_DIR,
-      imageRelativeName(relativePath, index + 1, extension),
-    );
     try {
-      const imageRoot = join(inputRoot, EXTRACTION_TEMP_DIR);
-      if (!imagePath.startsWith(`${imageRoot}/`)) {
-        warnings.push(`${extracted.data.sourceFormat}: skipped embedded image with unsafe generated path.`);
-        continue;
-      }
       await mkdir(join(imagePath, ".."), { recursive: true });
-      await writeFile(imagePath, image.data);
-      stagedImageBytes += image.data.byteLength;
-      embeddedImages.push({
-        path: imagePath,
-        ...(image.context === undefined ? {} : { context: image.context }),
-        ...(image.location === undefined ? {} : { location: image.location }),
-      });
+      await writeFile(imagePath, entry.data);
+      embeddedImages.push({ ...entry.record, path: imagePath });
     } catch (error) {
-      warnings.push(`${extracted.data.sourceFormat}: failed to stage embedded image ${index + 1}: ${errorMessage(error)}.`);
+      warnings.push(`${extracted.data.sourceFormat}: failed to stage embedded image ${entry.record.id}: ${errorMessage(error)}.`);
+      dropped++;
     }
   }
+  const findingsRelativeName = embeddedImages.length === 0
+    ? undefined
+    : findingsRelativeNameFor(tempRelativeNames[0] ?? relativePath);
+  const imageStatistics: ImageStagingStatistics = {
+    occurrences: payloads.length,
+    occurrencesWithContext: payloads.filter((payload) => (payload.context ?? "").trim().length > 0).length,
+    unique: catalog.images.length,
+    duplicates: catalog.duplicates,
+    tiny: embeddedImages.filter((image) => image.status === "decorative").length,
+    broken: embeddedImages.filter((image) => image.status === "broken").length,
+    staged: embeddedImages.filter((image) => image.status === "staged").length,
+    dropped,
+  };
 
   return ok<ExtractedArtifact>({
     extractedTextPaths,
     tempRelativeNames,
     sourceFormat: extracted.data.sourceFormat,
     embeddedImages,
-    warnings,
+    imageStatistics,
+    ...(findingsRelativeName === undefined
+      ? {}
+      : { imageFindingsRelativeName: findingsRelativeName, imageFindingsPath: join(imageRoot, findingsRelativeName) }),
+    warnings: aggregateWarnings(warnings),
   });
 }
 
@@ -212,6 +332,16 @@ function partNames(base: string, partCount: number): readonly string[] {
     names.push(`${base}.part${String(index).padStart(2, "0")}.txt`);
   }
   return names;
+}
+
+/**
+ * Findings file name derived from the first extracted text name, so it
+ * inherits the same collision handling: `notes/foo-extracted.txt` ->
+ * `notes/foo-image-findings.txt`, `notes/foo.odt-extracted.part01.txt` ->
+ * `notes/foo.odt-image-findings.txt`.
+ */
+function findingsRelativeNameFor(extractedRelativeName: string): string {
+  return extractedRelativeName.replace(/-extracted(?:\.part\d+)?\.txt$/, "-image-findings.txt");
 }
 
 function imageRelativeName(relativePath: string, index: number, extension: string): string {

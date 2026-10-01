@@ -32,7 +32,7 @@ describe("readEmbeddedImages", () => {
     const result = await readEmbeddedImages([reference("chart.png", data)], "pptx");
     expect(result.warnings).toEqual([]);
     expect(result.images).toEqual([
-      { data, mediaType: "image/png", location: "Slide 4", context: "Revenue overview" },
+      { data, mediaType: "image/png", sourceName: "chart.png", location: "Slide 4", context: "Revenue overview" },
     ]);
   });
 

@@ -163,7 +163,7 @@ describe("DocxRepository", () => {
     if (!result.success) return;
     expect(result.data.embeddedImages).toHaveLength(1);
     expect(result.data.embeddedImages?.[0]?.location).toContain("section uncertain");
-    expect(result.data.warnings.some((warning) => warning.includes("could not be resolved"))).toBe(true);
+    expect(result.data.warnings.some((warning) => warning.includes("unexpected relationship type"))).toBe(true);
   });
 
   it("extracts DOCX chart findings and associates surrounding heading context", async () => {

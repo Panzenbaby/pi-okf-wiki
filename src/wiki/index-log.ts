@@ -16,6 +16,7 @@
 import { join } from "node:path";
 import { ok, type Concept, type Result } from "../types.ts";
 import { listFiles, readTextFile, removeFile, writeTextFile } from "../files.ts";
+import { aggregateWarnings } from "../warnings.ts";
 import { ARCHIVE_DIR, TRASH_DIR } from "./paths.ts";
 import type { WikiDiff } from "./concepts.ts";
 
@@ -201,11 +202,12 @@ export async function appendLogMd(
   date: string,
   diff: WikiDiff,
   warnings: readonly string[] = [],
+  imageSummaries: readonly string[] = [],
 ): Promise<Result<void>> {
   const logPath = join(wikiRoot, "log.md");
   const existing = await readTextFile(logPath);
   const header = `${LOG_TITLE}\n\n`;
-  const entry = buildLogEntry(date, diff, warnings);
+  const entry = buildLogEntry(date, diff, aggregateWarnings(warnings), imageSummaries);
   if (!existing.success) return writeTextFile(logPath, header + entry);
   // Strip our own title if present, then re-add it above the new entry. A log
   // whose first line is something else (hand-edited, or written by an older
@@ -218,7 +220,12 @@ export async function appendLogMd(
 /** First line of `log.md`. Also the anchor `appendLogMd` splices new entries after. */
 const LOG_TITLE = "# Wiki Update Log";
 
-function buildLogEntry(date: string, diff: WikiDiff, warnings: readonly string[] = []): string {
+function buildLogEntry(
+  date: string,
+  diff: WikiDiff,
+  warnings: readonly string[] = [],
+  imageSummaries: readonly string[] = [],
+): string {
   const lines: string[] = [`## ${date}`, ""];
   for (const conceptId of diff.created) {
     lines.push(`* **Creation**: Added [${conceptId}](/${conceptId}.md).`);
@@ -232,11 +239,18 @@ function buildLogEntry(date: string, diff: WikiDiff, warnings: readonly string[]
   for (const removal of diff.removed ?? []) {
     lines.push(`* **Removal**: Removed [${removal.conceptId}](${removal.trashPath}).`);
   }
+  // One line per document with embedded images: status counts + IDs missing a finding.
+  for (const summary of imageSummaries) {
+    lines.push(`* **Images**: ${summary.replace(/\s+/g, " ").trim()}`);
+  }
   for (const warning of warnings) {
     lines.push(`* **Warning**: ${warning.replace(/\s+/g, " ").trim()}`);
   }
   const removedCount = diff.removed?.length ?? 0;
-  if (diff.created.length === 0 && diff.updated.length === 0 && removedCount === 0 && warnings.length === 0) {
+  if (
+    diff.created.length === 0 && diff.updated.length === 0 && removedCount === 0
+    && warnings.length === 0 && imageSummaries.length === 0
+  ) {
     lines.push("* **No-op**: No concepts changed.");
   }
   // Trailing blank line so the next `## <date>` block is separated from this

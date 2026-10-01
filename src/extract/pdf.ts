@@ -7,7 +7,7 @@
 //   - anything else      -> "extraction_failed"
 
 import { readFile } from "node:fs/promises";
-import { PNG } from "pngjs";
+import { PNG, type ColorType } from "pngjs";
 
 import { ok, type Result } from "../types.ts";
 import type { EmbeddedImage, ExtractedText, DocumentExtractorRepository } from "./types.ts";
@@ -35,10 +35,15 @@ interface UnpdfModuleDto {
   extractImages(proxy: { readonly numPages: number }, page: number): Promise<readonly UnpdfImageDto[]>;
 }
 
-const MAX_PDF_IMAGE_COUNT = 24;
+/**
+ * Workload caps. Images are pre-analyzed in batches by a model instead of all
+ * entering the agent context, so the count cap is generous; the pixel/byte
+ * caps (measured on raw decoded pixel data) still bound memory.
+ */
+const MAX_PDF_IMAGE_COUNT = 200;
 const MAX_PDF_IMAGE_PIXELS = 16_000_000;
-const MAX_PDF_IMAGE_BYTES = 8 * 1024 * 1024;
-const MAX_PDF_TOTAL_IMAGE_BYTES = 32 * 1024 * 1024;
+const MAX_PDF_IMAGE_BYTES = 64 * 1024 * 1024;
+const MAX_PDF_TOTAL_IMAGE_BYTES = 256 * 1024 * 1024;
 
 export class PdfRepository implements DocumentExtractorRepository {
   readonly supportedExtensions = [".pdf"] as const;
@@ -70,11 +75,15 @@ export class PdfRepository implements DocumentExtractorRepository {
       for (let page = 1; page <= proxy.numPages; page++) {
         try {
           const pageImages = await unpdf.extractImages(proxy, page);
-          for (const image of pageImages) {
+          for (const [pageImageIndex, image] of pageImages.entries()) {
             extractedImageCount++;
             if (embeddedImages.length >= MAX_PDF_IMAGE_COUNT) {
               warnings.push(`PDF: skipped remaining embedded images after the ${MAX_PDF_IMAGE_COUNT}-image limit.`);
               break;
+            }
+            if (image.data.byteLength !== image.width * image.height * image.channels) {
+              warnings.push(`PDF: skipped an image on page ${page} whose pixel data does not match its ${image.width} x ${image.height} x ${image.channels} layout (broken extraction).`);
+              continue;
             }
             if (image.width * image.height > MAX_PDF_IMAGE_PIXELS) {
               warnings.push(`PDF: skipped oversized image on page ${page} (${image.width} x ${image.height} pixels).`);
@@ -89,24 +98,14 @@ export class PdfRepository implements DocumentExtractorRepository {
               warnings.push(`PDF: skipped remaining images after the ${MAX_PDF_TOTAL_IMAGE_BYTES}-byte workload limit.`);
               break;
             }
-            const colorType = image.channels === 1 ? 0 : image.channels === 3 ? 2 : 6;
-            const pngData = PNG.sync.write(
-              Object.assign(new PNG({
-                width: image.width,
-                height: image.height,
-                inputColorType: colorType,
-                inputHasAlpha: image.channels === 4,
-                colorType: 6,
-              }), {
-                data: Buffer.from(image.data),
-              }),
-            );
+            const pngData = encodePng(image);
             totalImageBytes += rawImageBytes;
             const pageContext = pageTexts[page - 1]?.trim();
             embeddedImages.push({
               data: pngData,
               mediaType: "image/png",
               location: `Page ${page}`,
+              sourceName: `page ${page} image ${pageImageIndex + 1}`,
               ...(pageContext === undefined || pageContext.length === 0 ? {} : { context: pageContext.slice(0, 1000) }),
             });
           }
@@ -135,6 +134,31 @@ export class PdfRepository implements DocumentExtractorRepository {
       return extractionFailure(cause, `PDF extraction failed: ${message(error)}`, absolutePath);
     }
   }
+}
+
+/** Raw, uncompressed pixel data (8 bits per channel, row-major, no padding). */
+export interface RawPixelImage {
+  readonly data: Uint8Array | Uint8ClampedArray;
+  readonly width: number;
+  readonly height: number;
+  readonly channels: 1 | 3 | 4;
+}
+
+/**
+ * Encode unpdf's raw pixel buffer as PNG. The input layout MUST be passed to
+ * `PNG.sync.write` as packer options: pngjs ignores options given to the `PNG`
+ * constructor when packing synchronously and would otherwise read RGB bytes as
+ * RGBA, producing striped/smeared garbage (the bug behind broken PDF images).
+ */
+export function encodePng(image: RawPixelImage): Buffer {
+  const inputColorType: ColorType = image.channels === 1 ? 0 : image.channels === 3 ? 2 : 6;
+  const png = new PNG({ width: image.width, height: image.height });
+  png.data = Buffer.from(image.data.buffer, image.data.byteOffset, image.data.byteLength);
+  return PNG.sync.write(png, {
+    inputColorType,
+    inputHasAlpha: image.channels === 4,
+    colorType: image.channels === 4 ? 6 : image.channels === 1 ? 0 : 2,
+  });
 }
 
 function isPasswordError(error: unknown): boolean {

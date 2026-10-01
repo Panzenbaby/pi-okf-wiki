@@ -55,15 +55,32 @@ describe("buildUpdatePrompt file list", () => {
         extractedTextPaths: ["/w/input/.okf-extract/reports/sales-extracted.txt"],
         sourceFormat: "pptx",
         embeddedImages: [{
+          id: "img-01",
           path: "/w/input/.okf-extract/reports/sales-embedded-image-01.png",
-          location: "Slide 4",
-          context: "Revenue overview",
+          mediaType: "image/png",
+          byteLength: 2048,
+          sha256: "a",
+          occurrences: [{ location: "Slide 4", context: "Revenue overview" }],
+          status: "failed",
+        }, {
+          id: "img-02",
+          path: "/w/input/.okf-extract/reports/sales-embedded-image-02.png",
+          mediaType: "image/png",
+          byteLength: 2048,
+          sha256: "b",
+          occurrences: [{ location: "Slide 5" }],
+          status: "analyzed",
+          finding: { id: "img-02", classification: "content", description: "Bar chart", legibleValues: ["Q1: 10"], uncertainties: [] },
         }],
+        imageFindingsPath: "/w/input/.okf-extract/reports/sales-image-findings.txt",
         extractionWarnings: ["pptx: skipped image beyond workload limit"],
       },
     ]);
-    expect(prompt).toContain("sales-embedded-image-01.png — Slide 4");
+    expect(prompt).toContain("Image findings (READ this file instead of the images): /w/input/.okf-extract/reports/sales-image-findings.txt");
+    expect(prompt).toContain("img-01: /w/input/.okf-extract/reports/sales-embedded-image-01.png — Slide 4");
+    expect(prompt).not.toContain("img-02: /w/input");
     expect(prompt).toContain("surrounding text: Revenue overview");
+    expect(prompt).toContain("## Image outcomes");
     expect(prompt).toContain("record these in the update log");
     expect(prompt).toContain("Embedded images are temporary visual aids");
     expect(prompt).toContain("state unreadable content or uncertain context without guessing");
